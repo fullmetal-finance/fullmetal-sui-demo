@@ -88,11 +88,19 @@ async function main() {
     client.deepbook.deepBook.swapExactBaseForQuote({
       poolKey: POOL_KEY,
       amount: baseIn,
-      deepAmount: 0, // SUI/DBUSDC is whitelisted: no DEEP fee needed
+      deepAmount: 0, // zero DEEP coin => DeepBook takes the taker fee from the input SUI
       minOut: 0,     // test swap on testnet; set a real min in production
     }),
   );
-  tx.transferObjects([baseRemainder, quoteOut, deepRemainder], address);
+  tx.transferObjects([baseRemainder, quoteOut], address);
+  // the swap API always hands back a Coin<DEEP> remainder; ours is always zero
+  // (fees paid in input coin), so burn the empty object instead of sending
+  // 0-DEEP dust to the wallet
+  tx.moveCall({
+    target: '0x2::coin::destroy_zero',
+    typeArguments: [testnetCoins.DEEP.type],
+    arguments: [deepRemainder],
+  });
 
   const result = await client.core.signAndExecuteTransaction({
     transaction: tx,
