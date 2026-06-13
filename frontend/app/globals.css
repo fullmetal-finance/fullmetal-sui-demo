@@ -1,0 +1,93 @@
+@import "tailwindcss";
+
+/* ------------------------------------------------------------------ */
+/*  Fullmetal.Finance design tokens                                    */
+/*  Palette + type ported from the institutional "smart collateral"    */
+/*  visual language (see sample-animation.html).                       */
+/* ------------------------------------------------------------------ */
+
+:root {
+  /* surfaces */
+  --bg: #f7f5f0;
+  --surface: #fbfaf6;
+  --line: rgba(0, 0, 0, 0.08);
+  --line-strong: rgba(0, 0, 0, 0.22);
+
+  /* ink / text */
+  --ink: #141414;
+  --ink-soft: #4a4843;
+  --muted: #807e76;
+  --faint: rgba(20, 20, 20, 0.38);
+
+  /* radii */
+  --radius-sm: 7px;
+  --radius-lg: 16px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121110;
+    --surface: #17150f;
+    --line: rgba(255, 255, 255, 0.09);
+    --line-strong: rgba(255, 255, 255, 0.22);
+
+    --ink: #f2efe7;
+    --ink-soft: #b0aea6;
+    --muted: #8a8881;
+    --faint: rgba(236, 233, 225, 0.4);
+  }
+}
+
+/* Expose tokens as Tailwind utilities (text-ink, bg-surface, border-line…) */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+
+  --radius-lg: var(--radius-lg);
+
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans), system-ui, sans-serif;
+  line-height: 2.00;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Mono eyebrow / label treatment used throughout the site */
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 13px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.eyebrow::before {
+  content: "";
+  width: 26px;
+  height: 0.5px;
+  background: var(--muted);
+  display: inline-block;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
