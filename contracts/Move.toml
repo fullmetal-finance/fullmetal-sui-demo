@@ -1,0 +1,11 @@
+[package]
+name = "fullmetal"
+edition = "2024"
+license = "MIT"
+
+# Sui framework is provided implicitly by the CLI's system packages on
+# Sui >= 1.x; no explicit git dependency needed for a framework-only package.
+[dependencies]
+
+[addresses]
+fullmetal = "0x0"

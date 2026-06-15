@@ -1,0 +1,67 @@
+/// Canonical error-code registry for the Fullmetal package.
+///
+/// Move constants are module-private, so each code is exposed through a
+/// `public(package)` getter. Every module aborts with these getters, giving a
+/// single globally-unique numbering — a failed tx's code names the failure.
+module fullmetal::errors;
+
+// --- binding / auth (0–9) ---
+const EWrongInstitution: u64 = 0; // cap.institution_id != this institution
+const EAdminRevoked: u64 = 1; // AdminCap not in live_admin_caps
+const ECapRevoked: u64 = 2; // TraderCap not live / stale epoch / cap_id mismatch
+const ENotActive: u64 = 3; // trader marked inactive
+const ENotProposedAdmin: u64 = 4; // accept_admin_transfer by wrong address
+const EAdminTransferPending: u64 = 5; // propose while a transfer is already pending
+
+// --- governance invariants (10–19) ---
+const ECannotRemoveLastAdmin: u64 = 10; // admin_count would drop to 0
+const EAlreadyPaused: u64 = 11;
+const ENotPaused: u64 = 12;
+const EPaused: u64 = 13; // value-moving call while paused
+
+// --- treasury (20–29) ---
+const EZeroAmount: u64 = 20;
+const EWouldUnderfundReserved: u64 = 21; // withdraw > available (breaks total >= reserved)
+const EInsufficientTreasury: u64 = 22; // reserve/settlement exceeds available
+
+// --- traders / limits (30–39) ---
+const ETraderExists: u64 = 30;
+const ENoSuchTrader: u64 = 31;
+const EOverBookSize: u64 = 32; // deployed + amount > book_size
+const ECannotShrinkBelowDeployed: u64 = 33;
+
+// --- registry (40–49) ---
+const EHandleTaken: u64 = 40;
+const EHandleInvalid: u64 = 41; // charset / length
+
+// --- OTC + settlement seams (50–59) ---
+const EWitnessNotAllowed: u64 = 50; // OTC witness type not allowlisted / mismatched
+const ETicketMismatch: u64 = 51; // settlement payee != ticket.to_inst
+const EContractExists: u64 = 52; // otc_id already registered
+const ENoContract: u64 = 53; // otc_id not registered or already closed
+const ERecallTooLarge: u64 = 54; // release/recall exceeds reserved/deployed/rehypothecated
+
+public(package) fun e_wrong_institution(): u64 { EWrongInstitution }
+public(package) fun e_admin_revoked(): u64 { EAdminRevoked }
+public(package) fun e_cap_revoked(): u64 { ECapRevoked }
+public(package) fun e_not_active(): u64 { ENotActive }
+public(package) fun e_not_proposed_admin(): u64 { ENotProposedAdmin }
+public(package) fun e_admin_transfer_pending(): u64 { EAdminTransferPending }
+public(package) fun e_cannot_remove_last_admin(): u64 { ECannotRemoveLastAdmin }
+public(package) fun e_already_paused(): u64 { EAlreadyPaused }
+public(package) fun e_not_paused(): u64 { ENotPaused }
+public(package) fun e_paused(): u64 { EPaused }
+public(package) fun e_zero_amount(): u64 { EZeroAmount }
+public(package) fun e_would_underfund_reserved(): u64 { EWouldUnderfundReserved }
+public(package) fun e_insufficient_treasury(): u64 { EInsufficientTreasury }
+public(package) fun e_trader_exists(): u64 { ETraderExists }
+public(package) fun e_no_such_trader(): u64 { ENoSuchTrader }
+public(package) fun e_over_book_size(): u64 { EOverBookSize }
+public(package) fun e_cannot_shrink_below_deployed(): u64 { ECannotShrinkBelowDeployed }
+public(package) fun e_handle_taken(): u64 { EHandleTaken }
+public(package) fun e_handle_invalid(): u64 { EHandleInvalid }
+public(package) fun e_witness_not_allowed(): u64 { EWitnessNotAllowed }
+public(package) fun e_ticket_mismatch(): u64 { ETicketMismatch }
+public(package) fun e_contract_exists(): u64 { EContractExists }
+public(package) fun e_no_contract(): u64 { ENoContract }
+public(package) fun e_recall_too_large(): u64 { ERecallTooLarge }
