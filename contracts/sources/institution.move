@@ -99,7 +99,8 @@ public struct ContractRef has store {
 // Guards
 // ===================================================================
 
-fun assert_admin<C>(inst: &Institution<C>, cap: &AdminCap) {
+/// public(package) so same-package modules (e.g. rehypo) can admin-gate too.
+public(package) fun assert_admin<C>(inst: &Institution<C>, cap: &AdminCap) {
     assert!(object::id(inst) == cap.institution_id, errors::e_wrong_institution());
     assert!(
         vec_set::contains(&inst.admins.live_admin_caps, &object::id(cap)),
@@ -303,6 +304,9 @@ public fun withdraw_treasury<C>(
     assert_not_paused(inst);
     assert!(amount > 0, errors::e_zero_amount());
     assert!(amount <= available(inst), errors::e_would_underfund_reserved());
+    // economically free funds may be sitting in DeepBook (rehypothecated); only
+    // physically-liquid balance can be handed out — recall first otherwise.
+    assert!(amount <= balance::value(&inst.treasury), errors::e_insufficient_liquidity());
     let c = coin::take(&mut inst.treasury, amount, ctx);
     events::emit_treasury_withdrawn(
         object::id(inst),
@@ -314,13 +318,23 @@ public fun withdraw_treasury<C>(
     c
 }
 
-/// Free, unencumbered funds. Saturating: never aborts even if a future
-/// rehypothecation milestone lets physical balance dip below `reserved`.
-public fun available<C>(inst: &Institution<C>): u64 {
-    let bal = balance::value(&inst.treasury);
-    if (bal <= inst.reserved) 0 else bal - inst.reserved
+/// Total assets the institution controls = liquid balance + funds supplied into
+/// DeepBook (rehypothecated funds are still ours, just earning yield).
+public fun equity<C>(inst: &Institution<C>): u64 {
+    balance::value(&inst.treasury) + inst.rehypothecated
 }
 
+/// Free, unencumbered funds = equity − reserved IM. Saturating, so it never
+/// aborts even when reserved IM is temporarily supplied out to DeepBook (which
+/// drops the liquid balance below `reserved`). NOTE: this is the ECONOMIC free
+/// amount; physical withdrawal is additionally bounded by the liquid balance
+/// (see `withdraw_treasury`) — recall from DeepBook to liquefy the rest.
+public fun available<C>(inst: &Institution<C>): u64 {
+    let eq = equity(inst);
+    if (eq <= inst.reserved) 0 else eq - inst.reserved
+}
+
+/// Physically-liquid balance (excludes rehypothecated funds).
 public fun total<C>(inst: &Institution<C>): u64 { balance::value(&inst.treasury) }
 
 public fun reserved_of<C>(inst: &Institution<C>): u64 { inst.reserved }
@@ -609,4 +623,16 @@ public(package) fun note_recalled<C>(
 /// split funds out / join funds back.
 public(package) fun treasury_mut<C>(inst: &mut Institution<C>): &mut Balance<C> {
     &mut inst.treasury
+}
+
+/// Mutable UID so the same-package rehypo module can stash the DeepBook
+/// `SupplierCap` as a dynamic field on the institution (keeps the core module
+/// free of any DeepBook type dependency).
+public(package) fun uid_mut<C>(inst: &mut Institution<C>): &mut UID {
+    &mut inst.id
+}
+
+/// Immutable UID for reading dynamic fields.
+public(package) fun uid<C>(inst: &Institution<C>): &UID {
+    &inst.id
 }

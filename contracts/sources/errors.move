@@ -23,6 +23,7 @@ const EPaused: u64 = 13; // value-moving call while paused
 const EZeroAmount: u64 = 20;
 const EWouldUnderfundReserved: u64 = 21; // withdraw > available (breaks total >= reserved)
 const EInsufficientTreasury: u64 = 22; // reserve/settlement exceeds available
+const EInsufficientLiquidity: u64 = 23; // economically free but physically rehypothecated; recall first
 
 // --- traders / limits (30–39) ---
 const ETraderExists: u64 = 30;
@@ -41,6 +42,21 @@ const EContractExists: u64 = 52; // otc_id already registered
 const ENoContract: u64 = 53; // otc_id not registered or already closed
 const ERecallTooLarge: u64 = 54; // release/recall exceeds reserved/deployed/rehypothecated
 
+// --- oracle (60–69) ---
+const EFeedExists: u64 = 60;
+const ENoFeed: u64 = 61;
+const EZeroPrice: u64 = 62;
+const ETriggerNotActive: u64 = 63; // risk-responsive recall attempted while no trigger is active
+
+// --- otc forward (70–89) ---
+const ENotCounterparties: u64 = 70; // the two institutions are the same / mismatched
+const EContractNotActive: u64 = 71;
+const ENotDueYet: u64 = 72; // settlement interval has not elapsed
+const EHealthy: u64 = 73; // liquidation attempted on a healthy position
+const ENotExpired: u64 = 74;
+const EWrongOracleFeed: u64 = 75; // oracle symbol does not match the contract underlying
+const EZeroNotional: u64 = 76;
+
 public(package) fun e_wrong_institution(): u64 { EWrongInstitution }
 public(package) fun e_admin_revoked(): u64 { EAdminRevoked }
 public(package) fun e_cap_revoked(): u64 { ECapRevoked }
@@ -54,6 +70,7 @@ public(package) fun e_paused(): u64 { EPaused }
 public(package) fun e_zero_amount(): u64 { EZeroAmount }
 public(package) fun e_would_underfund_reserved(): u64 { EWouldUnderfundReserved }
 public(package) fun e_insufficient_treasury(): u64 { EInsufficientTreasury }
+public(package) fun e_insufficient_liquidity(): u64 { EInsufficientLiquidity }
 public(package) fun e_trader_exists(): u64 { ETraderExists }
 public(package) fun e_no_such_trader(): u64 { ENoSuchTrader }
 public(package) fun e_over_book_size(): u64 { EOverBookSize }
@@ -65,3 +82,14 @@ public(package) fun e_ticket_mismatch(): u64 { ETicketMismatch }
 public(package) fun e_contract_exists(): u64 { EContractExists }
 public(package) fun e_no_contract(): u64 { ENoContract }
 public(package) fun e_recall_too_large(): u64 { ERecallTooLarge }
+public(package) fun e_feed_exists(): u64 { EFeedExists }
+public(package) fun e_no_feed(): u64 { ENoFeed }
+public(package) fun e_zero_price(): u64 { EZeroPrice }
+public(package) fun e_trigger_not_active(): u64 { ETriggerNotActive }
+public(package) fun e_not_counterparties(): u64 { ENotCounterparties }
+public(package) fun e_contract_not_active(): u64 { EContractNotActive }
+public(package) fun e_not_due_yet(): u64 { ENotDueYet }
+public(package) fun e_healthy(): u64 { EHealthy }
+public(package) fun e_not_expired(): u64 { ENotExpired }
+public(package) fun e_wrong_oracle_feed(): u64 { EWrongOracleFeed }
+public(package) fun e_zero_notional(): u64 { EZeroNotional }
