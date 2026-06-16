@@ -250,3 +250,125 @@ public(package) fun emit_rehypo_recalled(
 ) {
     event::emit(RehypoRecalled { institution_id, amount, new_rehypothecated, by });
 }
+
+// ----- RFQ -----
+
+public struct MarginRekeyed has copy, drop {
+    institution_id: ID,
+    old_otc_id: ID,
+    new_otc_id: ID,
+    trader: address,
+    amount: u64,
+}
+public struct RfqOpened has copy, drop {
+    rfq_id: ID,
+    requester_inst: ID,
+    requester_trader: address,
+    requester_side: u8,
+    underlying: String,
+    notional: u64,
+    im_each: u64,
+    targets_len: u64,
+    rfq_expiry_ms: u64,
+    by: address,
+}
+public struct QuoteSubmitted has copy, drop {
+    rfq_id: ID,
+    quote_id: ID,
+    maker_inst: ID,
+    maker_trader: address,
+    entry_price: u64,
+    im_each: u64,
+    quote_expiry_ms: u64,
+    by: address,
+}
+public struct QuoteWithdrawn has copy, drop { rfq_id: ID, quote_id: ID, maker_inst: ID, freed: u64, by: address }
+public struct QuoteReclaimed has copy, drop { rfq_id: ID, quote_id: ID, maker_inst: ID, freed: u64, by: address }
+public struct RfqFilled has copy, drop {
+    rfq_id: ID,
+    quote_id: ID,
+    otc_id: ID,
+    requester_inst: ID,
+    maker_inst: ID,
+    entry_price: u64,
+    im_each: u64,
+    by: address,
+}
+public struct RfqCancelled has copy, drop { rfq_id: ID, requester_inst: ID, by: address }
+
+public(package) fun emit_margin_rekeyed(
+    institution_id: ID,
+    old_otc_id: ID,
+    new_otc_id: ID,
+    trader: address,
+    amount: u64,
+) {
+    event::emit(MarginRekeyed { institution_id, old_otc_id, new_otc_id, trader, amount });
+}
+public(package) fun emit_rfq_opened(
+    rfq_id: ID,
+    requester_inst: ID,
+    requester_trader: address,
+    requester_side: u8,
+    underlying: String,
+    notional: u64,
+    im_each: u64,
+    targets_len: u64,
+    rfq_expiry_ms: u64,
+    by: address,
+) {
+    event::emit(RfqOpened {
+        rfq_id,
+        requester_inst,
+        requester_trader,
+        requester_side,
+        underlying,
+        notional,
+        im_each,
+        targets_len,
+        rfq_expiry_ms,
+        by,
+    });
+}
+public(package) fun emit_quote_submitted(
+    rfq_id: ID,
+    quote_id: ID,
+    maker_inst: ID,
+    maker_trader: address,
+    entry_price: u64,
+    im_each: u64,
+    quote_expiry_ms: u64,
+    by: address,
+) {
+    event::emit(QuoteSubmitted {
+        rfq_id,
+        quote_id,
+        maker_inst,
+        maker_trader,
+        entry_price,
+        im_each,
+        quote_expiry_ms,
+        by,
+    });
+}
+public(package) fun emit_quote_withdrawn(rfq_id: ID, quote_id: ID, maker_inst: ID, freed: u64, by: address) {
+    event::emit(QuoteWithdrawn { rfq_id, quote_id, maker_inst, freed, by });
+}
+public(package) fun emit_quote_reclaimed(rfq_id: ID, quote_id: ID, maker_inst: ID, freed: u64, by: address) {
+    event::emit(QuoteReclaimed { rfq_id, quote_id, maker_inst, freed, by });
+}
+public(package) fun emit_rfq_filled(
+    rfq_id: ID,
+    quote_id: ID,
+    otc_id: ID,
+    requester_inst: ID,
+    maker_inst: ID,
+    entry_price: u64,
+    im_each: u64,
+    by: address,
+) {
+    event::emit(RfqFilled { rfq_id, quote_id, otc_id, requester_inst, maker_inst, entry_price, im_each, by });
+}
+public(package) fun emit_rfq_cancelled(rfq_id: ID, requester_inst: ID, by: address) {
+    event::emit(RfqCancelled { rfq_id, requester_inst, by });
+}

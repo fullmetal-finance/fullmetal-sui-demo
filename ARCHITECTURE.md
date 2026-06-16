@@ -36,7 +36,8 @@ The package is `fullmetal` (Move 2024, framework + OZ math + `deepbook_margin`).
 | `settlement` | seam | Hot-potato atomic value transfer between two institutions | — |
 | `oracle` | singleton | Keeper-pushed prices + volatility trigger | — |
 | `rehypo` | integration | Supply/recall institution collateral ↔ DeepBook margin pool | `deepbook_margin` |
-| `otc_forward` | product | Bilateral forward contract object; MTM, funding, liquidation | OZ `fp_math`, `math` |
+| `otc_forward` | product | Bilateral forward contract object; MTM, funding, liquidation; the `open_from_rfq` + `RfqWitness` seam | OZ `fp_math`, `math` |
+| `rfq` | product | Request-for-quote: firm collateral-backed quotes → atomic single-signer accept | — |
 
 ```
 errors ── events
@@ -257,42 +258,48 @@ flowchart TD
 
 ---
 
-## 10. RFQ & contract finalization — current state and the gap
+## 10. RFQ — async request → firm quote → single-signer accept (BUILT)
 
-**This is the most important open item, and the answer to "how is IM escrowed
-after RFQ".**
+The `rfq` module is the **answer to "how is IM escrowed after RFQ"** and resolves
+the one hard problem: `otc_forward::open` needs *both* desks' `TraderCap`s in one
+transaction, but RFQ is inherently async. The design (chosen after studying
+Variational Pro, Paradigm, 0x, Hashflow) is **on-chain firm quotes** — and it
+deliberately **drops last-look** (a TradFi FX artifact that's hostile to a
+trust-minimized chain): a maker can *pull* a quote, but can't renege after it's
+accepted.
 
-### How it works *today* (no RFQ module yet)
-`otc_forward::open(...)` is a **single atomic transaction** that takes *both*
-institutions and *both* `TraderCap`s, and:
-1. reserves IM on each side via `institution::reserve_margin` — i.e. IM is
-   **escrowed by reservation**: each institution's `reserved` counter goes up,
-   but the collateral **never leaves its own pool**. There is no separate escrow
-   object holding the funds; the contract object holds only the *amount* and the
-   terms.
-2. creates and shares the `OtcForward` object.
-
-Finalization is **atomic**: if either side's reservation fails (revoked trader,
-over book size, insufficient `available`), the whole transaction aborts and no
-contract exists. There is no separate "finalize" step.
-
-**The gap:** this requires *both* parties to authorize in *one* PTB (both
-TraderCaps present). That models two desks co-signing, not an async RFQ where A
-requests quotes, several institutions respond, and A later accepts one.
-
-### How RFQ *will* work (to be built — see §12)
-An async flow with a quote object:
 ```
-A: post_rfq(terms, A's TraderCap)         → shared Rfq object (A's side intent recorded)
-B,C…: submit_quote(rfq, price, B's cap)    → Quote children (each a firm offer)
-A: accept_quote(rfq, quote)                → atomically: reserve IM on A and on the
-                                             quoting institution, then otc_forward::open
+open_rfq (requester)        → shared Rfq<C>          [no margin locked; targets = maker IDs or broadcast]
+submit_quote (maker signs)  → shared Quote<C> + maker IM FIRM-reserved
+                              under RfqWitness, keyed by the Quote id   [maker can now go offline]
+  withdraw_quote / reclaim  → release the firm IM                       [pull / permissionless cleanup]
+accept_quote (REQUESTER only) → otc_forward::open_from_rfq:
+                                • reserve requester IM (live cap, OtcWitness)
+                                • RE-KEY maker IM  quote_id→otc_id, RfqWitness→OtcWitness
+                                • share OtcForward<C>                   [both sides bound, ONE signer]
+… then the deployed settle / close / liquidation run UNCHANGED.
 ```
-IM is still **escrowed by reservation at accept time** (same mechanism), just
-reached through a multi-step negotiation. The accept transaction is the atomic
-finalization — it either reserves both IMs and opens the contract, or aborts.
-(Open question to settle when building: whether a quote should *pre-reserve* the
-quoter's IM when submitted, so an accepted quote can't fail for lack of funds.)
+
+**The async-open resolution.** The maker commits at *quote* time (it co-signs
+`submit_quote` with its own cap, firm-reserving IM — `reserve_margin` enforces
+`deployed + im ≤ book_size` and `im ≤ available`, so a maker physically can't
+publish a quote it can't back). `accept_quote` is signed by the **requester
+alone**: it reserves the requester leg with the live requester cap, then
+`rekey_reservation` relabels the maker's existing reservation onto the fresh
+contract id and swaps its witness `RfqWitness → OtcWitness` — a pure accounting
+relabel (no counter changes, magnitudes asserted equal), so no maker
+co-signature and no maker fade. IM is still **escrowed by reservation**, never
+moved.
+
+**Asymmetric commitment, by design:** the maker (whose price must be trustworthy)
+locks firm collateral when it quotes; the requester commits nothing until the
+single accept tx it signs. A maker's firm-quote lockup is bounded by the quote
+TTL via permissionless `reclaim_expired_quote`.
+
+`RfqWitness` lives in `otc_forward` (not `rfq`) so the module dependency is
+one-way (`rfq → otc_forward`), and is allowlisted by `ProtocolCap` like
+`OtcWitness`. *Deferred seam:* off-chain ed25519-signed quotes (Paradigm/0x
+style) for streaming scale, reusing `open_from_rfq` verbatim.
 
 ---
 
@@ -340,26 +347,49 @@ quoter's IM when submitted, so an accepted quote can't fail for lack of funds.)
 
 ---
 
-## 13. Deployment status & dependency note
+## 13. Deployment — LIVE on testnet
 
-The package **builds and unit-tests pass** (8 tests; run via `contracts/run-tests.sh`,
-which sets aside the DeepBook dep — `deepbook_margin`'s own tests can't compile
-as a dependency). **Publishing to testnet is currently blocked**: the deepbookv3
-packages (`deepbook`, `deepbook_margin`) and `pyth`/`wormhole` ship no
-`Published.toml`/lock publish records at the pinned revs, so the linker can't
-find their on-chain testnet addresses (`PublishUpgradeMissingDependency`). OZ
-ships `Published.toml` and resolves fine. **Resolution (next task):** supply
-each missing dep's testnet `published-at` + `original-id` (gathered above) as
-publish records and publish with `--skip-dependency-verification`, after
-confirming the deployed packages' API matches the pinned source.
+The package **builds, unit-tests pass** (8 tests; `contracts/run-tests.sh`), and
+is **deployed to testnet**, with the full rehypothecation loop proven on-chain
+with real DBUSDC.
+
+**How the dependency-publish hurdle was solved — MVR.** Publishing links against
+the deployed DeepBook on testnet; the deepbookv3 source revs ship no publish
+records, so the address can only come from an external resolver. The fix was the
+**MVR (Move Registry) resolver** (`mvr` binary installed on PATH):
+`deepbook_margin = { r.mvr = "@deepbook/margin-trading/13" }` in `Move.toml`.
+Note: only **version 13** of that MVR package carries git source (the latest, 14,
+does not), so the version is pinned. OZ math stays a git dep (it ships
+`Published.toml`).
+
+**Deployed objects (testnet):**
+
+| Object | ID |
+|---|---|
+| Package (current) | `0x7106aeb00de8f07c4f5c28e1fc7b13b03e42e474e6221db81e81b09ca80b561e` (upgrade w/ RFQ) |
+| Package (original-id) | `0x3dfbfa5254f00a0b501ebfdf449f044340e09f0629b37dfa7d834130157dfddf` |
+| UpgradeCap (owner) | `0xbe6518c77007f7fb3940faed2b4b3bf5ec8a6a7fcc653f66eeee548614149fe2` |
+| OtcAllowlist (shared) | `0x6adb6cb2a30e37a9255138a56981516f1267d2284fc06f28917034ad7413e68a` |
+| HandleRegistry (shared) | `0x1b18463c8e784b709f326787520e313f62eb75485ac2163673720d77eefddcc8` |
+| RiskOracle (shared) | `0xac39229ae9e9547582aa607c1bc084b42fd722aa5e74595af16875efcffb4cdd` |
+| ProtocolCap (owner) | `0x0b226a0531f0b4436b0c07b4cffaa45a8da64d4e04c8f390a86d950739d03eec` |
+| OracleAdminCap (owner) | `0x33adac6f64ae3ecb1af395de98f9a4f0708d1d97f4848a32dc428a7b9e651b87` |
+| UpgradeCap (owner) | `0xbe6518c77007f7fb3940faed2b4b3bf5ec8a6a7fcc653f66eeee548614149fe2` |
+
+**Proven loop** (`scripts/deploy-test.ts`): create institution → deposit 50
+DBUSDC → `rehypothecate` into the live DBUSDC margin pool (`0xf08568…`) →
+register an oracle feed + push a crash price (latch the trigger) →
+`recall_on_trigger` pulls the 50 DBUSDC back. Observed: `rehypothecated`
+50→0 and liquid treasury 0→50 across the recall.
 
 ---
 
 ## 14. Deferred / roadmap (contract side)
 
-- **RFQ module** — async quote→accept flow (see §10). *Biggest gap.*
-- **Resolve testnet publish** — dependency address records (§13), then the live
-  50-DBUSDC supply→recall demo.
+- **Off-chain signed quotes** — ed25519-signed maker quotes redeemed on-chain
+  (Paradigm/0x style) for streaming scale, reusing `open_from_rfq` (see §10).
+  The on-chain firm-quote RFQ is built; this is the scale seam.
+- **Makers competing on funding rate** (not just price), and IM-band negotiation.
 - **Cross-margin risk netting** — offset longs/shorts into one health number
   (currently a reservation sum); a standalone computed-view engine over `contracts`.
 - **Trader-initiated withdrawal** — `withdraw_permission` is stored but no
@@ -374,4 +404,6 @@ confirming the deployed packages' API matches the pinned source.
 
 | Date | Change |
 |---|---|
-| 2026-06-16 | Initial architecture: onboarding (institution/protocol/registry/settlement), oracle, rehypo (DeepBook), otc_forward. 8 tests pass. Deploy blocked on dependency publish records. |
+| 2026-06-16 | Initial architecture: onboarding (institution/protocol/registry/settlement), oracle, rehypo (DeepBook), otc_forward. 8 tests pass. |
+| 2026-06-16 | **Deployed to testnet** via MVR (`@deepbook/margin-trading/13`). Rehypothecate→trigger→recall loop proven on-chain with 50 real DBUSDC. |
+| 2026-06-16 | **RFQ module added** (on-chain firm quotes; firm-reserve-at-quote + re-key-at-accept solves single-signer async open). 10/10 tests. Package **upgraded** on testnet (via SDK — CLI is older than testnet protocol v126); OtcWitness + RfqWitness allowlisted. |

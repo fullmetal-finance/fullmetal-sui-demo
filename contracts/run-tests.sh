@@ -21,9 +21,8 @@ mv sources/rehypo.move /tmp/.fm_rehypo.bak
 python3 - <<'PY'
 import re
 s = open('Move.toml').read()
-s = s.replace(
-    'deepbook_margin = { git = "https://github.com/MystenLabs/deepbookv3.git", '
-    'subdir = "packages/deepbook_margin", rev = "9f69985258c18dc45c4a9b0c75e8f493a5b527a3" }\n', '')
+# drop the deepbook_margin dep (git or MVR form) + any dep-replacements block
+s = re.sub(r'\ndeepbook_margin = .*', '', s)
 s = re.sub(r'\n\[dep-replacements\.testnet\][^\[]*', '\n', s)
 open('Move.toml', 'w').write(s)
 PY

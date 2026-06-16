@@ -38,6 +38,12 @@ const STATUS_LIQUIDATED: u8 = 2;
 /// institutions. Must be allowlisted by the ProtocolCap holder at deploy.
 public struct OtcWitness has drop {}
 
+/// Witness for the RFQ flow's firm-quote reservations. Defined HERE (not in
+/// `rfq`) so `open_from_rfq` can name it without `otc_forward` depending on
+/// `rfq` — `rfq` depends on `otc_forward`, never the reverse (no module cycle).
+/// Must also be allowlisted by the ProtocolCap holder at deploy.
+public struct RfqWitness has drop {}
+
 /// One bilateral forward. Shared so both counterparties + any keeper can act.
 public struct OtcForward<phantom C> has key {
     id: UID,
@@ -147,6 +153,123 @@ public fun open<C>(
         im_each,
     });
     transfer::share_object(fwd);
+}
+
+/// Maintenance for an IM, the single source of truth so RFQ reserves the
+/// identical value the lifecycle expects on the re-keyed maker leg.
+public(package) fun maintenance_of(im_each: u64): u64 { muldiv(im_each, MAINTENANCE_BPS, 10_000, false) }
+
+/// Package-internal constructor so the `rfq` module can pass an `RfqWitness`
+/// value into `reserve_margin`/`release_margin` (struct construction is
+/// otc_forward-private). public(package) ⇒ only fullmetal modules can mint it;
+/// usability still requires the type-name be allowlisted by the ProtocolCap.
+public(package) fun rfq_witness(): RfqWitness { RfqWitness {} }
+
+/// The exact allowlist type-name strings for the two witnesses, so the deploy
+/// step can `allow_otc_witness` them without guessing the format.
+#[allow(deprecated_usage)]
+public fun otc_witness_name(): std::ascii::String {
+    std::type_name::get_with_original_ids<OtcWitness>().into_string()
+}
+
+#[allow(deprecated_usage)]
+public fun rfq_witness_name(): std::ascii::String {
+    std::type_name::get_with_original_ids<RfqWitness>().into_string()
+}
+
+/// RFQ-only constructor (package-internal; called by `rfq::accept_quote`).
+/// Builds + shares an OtcForward identical to `open`'s, but: reserves the
+/// REQUESTER leg via `reserve_margin<OtcWitness>` with its LIVE cap, and
+/// RE-KEYS the MAKER leg (already firm-reserved under RfqWitness at quote time,
+/// keyed by `maker_quote_id`) onto the fresh otc_id under OtcWitness. After
+/// this, both legs are OtcWitness-keyed, so the deployed settle/close/
+/// liquidation release them unchanged. The maker never co-signs.
+public(package) fun open_from_rfq<C>(
+    requester_inst: &mut Institution<C>,
+    requester_cap: &TraderCap,
+    requester_is_long: bool,
+    maker_inst: &mut Institution<C>,
+    maker_trader: address,
+    maker_quote_id: ID,
+    allow: &OtcAllowlist,
+    underlying: String,
+    notional: u64,
+    entry_price: u64,
+    im_each: u64,
+    funding_rate_bps: u64,
+    funding_long_pays: bool,
+    settlement_interval_ms: u64,
+    expiry_ms: u64,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): ID {
+    let req_id = object::id(requester_inst);
+    let maker_id = object::id(maker_inst);
+    assert!(req_id != maker_id, errors::e_not_counterparties());
+    assert!(notional > 0, errors::e_zero_notional());
+    assert!(entry_price > 0, errors::e_zero_price());
+
+    let maintenance = muldiv(im_each, MAINTENANCE_BPS, 10_000, false);
+    let notional_6dp = muldiv(entry_price, notional, PRICE_UNIT, false);
+    let now = clock::timestamp_ms(clock);
+
+    // resolve long/short from the requester's chosen side
+    let (inst_long, inst_short, trader_long, trader_short) = if (requester_is_long) {
+        (req_id, maker_id, institution::trader_of_cap(requester_cap), maker_trader)
+    } else {
+        (maker_id, req_id, maker_trader, institution::trader_of_cap(requester_cap))
+    };
+
+    let fwd = OtcForward<C> {
+        id: object::new(ctx),
+        inst_long,
+        inst_short,
+        trader_long,
+        trader_short,
+        underlying,
+        notional,
+        notional_6dp,
+        entry_price,
+        im_each,
+        maintenance_each: maintenance,
+        funding_rate_bps,
+        funding_long_pays,
+        settlement_interval_ms,
+        expiry_ms,
+        last_mark: entry_price,
+        last_settle_ms: now,
+        status: STATUS_ACTIVE,
+    };
+    let otc_id = object::id(&fwd);
+
+    // REQUESTER leg: live cap present in the accept PTB
+    institution::reserve_margin<C, OtcWitness>(
+        requester_inst, OtcWitness {}, allow, requester_cap, otc_id, maker_id, im_each, maintenance,
+    );
+    // MAKER leg: relabel the firm RfqWitness reservation -> OtcWitness at otc_id
+    institution::rekey_reservation<C, RfqWitness, OtcWitness>(
+        maker_inst,
+        RfqWitness {},
+        OtcWitness {},
+        allow,
+        maker_quote_id,
+        otc_id,
+        req_id,
+        im_each,
+        maintenance,
+    );
+
+    event::emit(ContractOpened {
+        otc_id,
+        inst_long,
+        inst_short,
+        underlying: fwd.underlying,
+        notional,
+        entry_price,
+        im_each,
+    });
+    transfer::share_object(fwd);
+    otc_id
 }
 
 /// Interval mark-to-market. Anyone (a keeper) may call once the interval has

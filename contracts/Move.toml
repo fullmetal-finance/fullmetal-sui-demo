@@ -10,10 +10,7 @@ license = "MIT"
 [dependencies]
 openzeppelin_math = { git = "https://github.com/OpenZeppelin/contracts-sui.git", subdir = "math/core", rev = "v1.2.0" }
 openzeppelin_fp_math = { git = "https://github.com/OpenZeppelin/contracts-sui.git", subdir = "math/fixed_point", rev = "v1.2.0" }
-deepbook_margin = { git = "https://github.com/MystenLabs/deepbookv3.git", subdir = "packages/deepbook_margin", rev = "9f69985258c18dc45c4a9b0c75e8f493a5b527a3" }
-
-[dep-replacements.testnet]
-pyth = { git = "https://github.com/pyth-network/pyth-crosschain.git", subdir = "target_chains/sui/contracts", rev = "sui-contract-testnet" }
+deepbook_margin = { r.mvr = "@deepbook/margin-trading/13" }
 
 [addresses]
 fullmetal = "0x0"

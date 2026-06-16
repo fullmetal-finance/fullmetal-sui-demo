@@ -57,6 +57,22 @@ const ENotExpired: u64 = 74;
 const EWrongOracleFeed: u64 = 75; // oracle symbol does not match the contract underlying
 const EZeroNotional: u64 = 76;
 
+// --- rfq (90–109) ---
+const ERfqNotOpen: u64 = 90;
+const ERfqExpired: u64 = 91;
+const ENotTargeted: u64 = 92;
+const EQuoteNotLive: u64 = 93;
+const EQuoteExpired: u64 = 94;
+const EQuoteNotExpired: u64 = 95;
+const EQuoteRfqMismatch: u64 = 96;
+const EWrongMakerInst: u64 = 97;
+const ENotRequester: u64 = 99;
+const EPriceOutOfBand: u64 = 100;
+const EQuoteOutlivesRfq: u64 = 101;
+const ENotQuoteOwner: u64 = 102;
+const EBadParams: u64 = 103;
+const EReservationMismatch: u64 = 104; // rekey magnitudes != expected
+
 public(package) fun e_wrong_institution(): u64 { EWrongInstitution }
 public(package) fun e_admin_revoked(): u64 { EAdminRevoked }
 public(package) fun e_cap_revoked(): u64 { ECapRevoked }
@@ -93,3 +109,17 @@ public(package) fun e_healthy(): u64 { EHealthy }
 public(package) fun e_not_expired(): u64 { ENotExpired }
 public(package) fun e_wrong_oracle_feed(): u64 { EWrongOracleFeed }
 public(package) fun e_zero_notional(): u64 { EZeroNotional }
+public(package) fun e_rfq_not_open(): u64 { ERfqNotOpen }
+public(package) fun e_rfq_expired(): u64 { ERfqExpired }
+public(package) fun e_not_targeted(): u64 { ENotTargeted }
+public(package) fun e_quote_not_live(): u64 { EQuoteNotLive }
+public(package) fun e_quote_expired(): u64 { EQuoteExpired }
+public(package) fun e_quote_not_expired(): u64 { EQuoteNotExpired }
+public(package) fun e_quote_rfq_mismatch(): u64 { EQuoteRfqMismatch }
+public(package) fun e_wrong_maker_inst(): u64 { EWrongMakerInst }
+public(package) fun e_not_requester(): u64 { ENotRequester }
+public(package) fun e_price_out_of_band(): u64 { EPriceOutOfBand }
+public(package) fun e_quote_outlives_rfq(): u64 { EQuoteOutlivesRfq }
+public(package) fun e_not_quote_owner(): u64 { ENotQuoteOwner }
+public(package) fun e_bad_params(): u64 { EBadParams }
+public(package) fun e_reservation_mismatch(): u64 { EReservationMismatch }

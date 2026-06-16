@@ -118,6 +118,12 @@ fun assert_trader<C>(inst: &Institution<C>, cap: &TraderCap) {
     assert!(info.cap_id == object::id(cap), errors::e_cap_revoked());
 }
 
+/// public(package) wrapper so same-package modules (rfq) can validate a TraderCap
+/// in paths that do not transit `reserve_margin`. Pure delegation.
+public(package) fun assert_trader_external<C>(inst: &Institution<C>, cap: &TraderCap) {
+    assert_trader(inst, cap);
+}
+
 /// public(package) so `settlement` can gate on it.
 public(package) fun assert_not_paused<C>(inst: &Institution<C>) {
     assert!(!inst.paused, errors::e_paused());
@@ -572,6 +578,57 @@ public fun release_margin<C, W: drop>(
         r.open = false;
     };
     events::emit_margin_released(object::id(inst), otc_id, rtrader, im);
+}
+
+/// Re-key an OPEN reservation from `old_id` to `new_id`, swapping its recorded
+/// witness `WOld` -> `WNew` and rewriting `counterparty`. Pure accounting
+/// relabel: `reserved`, `total_required`, and `traders[].deployed` are
+/// UNCHANGED. Asserts the row's magnitudes equal the expected values so an
+/// RFQ contract's two legs stay symmetric. No `TraderCap`: the original
+/// reservation already captured a full `assert_trader` at creation. This hands
+/// an authorization captured under one witness (RfqWitness, with a live maker
+/// cap at quote time) to another (OtcWitness) without re-presenting a cap.
+#[allow(deprecated_usage)]
+public(package) fun rekey_reservation<C, WOld: drop, WNew: drop>(
+    inst: &mut Institution<C>,
+    _w_old: WOld,
+    _w_new: WNew,
+    allow: &OtcAllowlist,
+    old_id: ID,
+    new_id: ID,
+    counterparty: ID,
+    expected_im: u64,
+    expected_maint: u64,
+) {
+    let old_name = type_name::get_with_original_ids<WOld>().into_string();
+    let new_name = type_name::get_with_original_ids<WNew>().into_string();
+    assert!(protocol::is_witness_allowed(allow, &old_name), errors::e_witness_not_allowed());
+    assert!(protocol::is_witness_allowed(allow, &new_name), errors::e_witness_not_allowed());
+    assert!(table::contains(&inst.contracts, old_id), errors::e_no_contract());
+    assert!(!table::contains(&inst.contracts, new_id), errors::e_contract_exists());
+
+    let (trader, im, maint, is_open, rwitness) = {
+        let r = table::borrow(&inst.contracts, old_id);
+        (r.trader, r.im_reserved, r.maintenance_required, r.open, r.witness)
+    };
+    assert!(is_open, errors::e_no_contract());
+    assert!(rwitness == old_name, errors::e_witness_not_allowed());
+    assert!(im == expected_im && maint == expected_maint, errors::e_reservation_mismatch());
+
+    { let r = table::borrow_mut(&mut inst.contracts, old_id); r.open = false; };
+    table::add(
+        &mut inst.contracts,
+        new_id,
+        ContractRef {
+            trader,
+            counterparty,
+            im_reserved: im,
+            maintenance_required: maint,
+            open: true,
+            witness: new_name,
+        },
+    );
+    events::emit_margin_rekeyed(object::id(inst), old_id, new_id, trader, im);
 }
 
 /// Read a contract record for the dashboard: (trader, counterparty, im_reserved,
