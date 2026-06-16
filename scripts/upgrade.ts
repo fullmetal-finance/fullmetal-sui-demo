@@ -14,7 +14,6 @@ import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from '@mysten/sui/jsonRpc';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
 
-const CURRENT_PKG = '0x3dfbfa5254f00a0b501ebfdf449f044340e09f0629b37dfa7d834130157dfddf';
 const UPGRADE_CAP = '0xbe6518c77007f7fb3940faed2b4b3bf5ec8a6a7fcc653f66eeee548614149fe2';
 const COMPATIBLE_POLICY = 0;
 
@@ -37,13 +36,20 @@ async function main() {
   const kp = keypair();
   const client = new SuiJsonRpcClient({ url: getJsonRpcFullnodeUrl('testnet') });
 
+  // The upgrade command must reference the CURRENT package the UpgradeCap points
+  // at (it advances on every commit), so read it live rather than hardcoding.
+  const capObj = await client.getObject({ id: UPGRADE_CAP, options: { showContent: true } });
+  const currentPkg = (capObj.data?.content as any)?.fields?.package as string;
+  if (!currentPkg) throw new Error('could not read UpgradeCap.package');
+  console.log('upgrading from package:', currentPkg);
+
   const tx = new Transaction();
   const cap = tx.object(UPGRADE_CAP);
   const ticket = tx.moveCall({
     target: '0x2::package::authorize_upgrade',
     arguments: [cap, tx.pure.u8(COMPATIBLE_POLICY), tx.pure.vector('u8', digest)],
   });
-  const receipt = tx.upgrade({ modules, dependencies, package: CURRENT_PKG, ticket });
+  const receipt = tx.upgrade({ modules, dependencies, package: currentPkg, ticket });
   tx.moveCall({ target: '0x2::package::commit_upgrade', arguments: [cap, receipt] });
 
   const res = await client.signAndExecuteTransaction({

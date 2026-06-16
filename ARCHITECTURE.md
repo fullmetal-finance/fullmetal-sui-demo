@@ -38,6 +38,7 @@ The package is `fullmetal` (Move 2024, framework + OZ math + `deepbook_margin`).
 | `rehypo` | integration | Supply/recall institution collateral ↔ DeepBook margin pool | `deepbook_margin` |
 | `otc_forward` | product | Bilateral forward contract object; MTM, funding, liquidation; the `open_from_rfq` + `RfqWitness` seam | OZ `fp_math`, `math` |
 | `rfq` | product | Request-for-quote: firm collateral-backed quotes → atomic single-signer accept | — |
+| `direct` | product | Direct bilateral offer ("type the counterparty's org ID"): proposer fixes all terms + commits collateral first → named desk accepts. Mirror of `rfq`, reuses `open_from_rfq`/`RfqWitness` | — |
 
 ```
 errors ── events
@@ -49,6 +50,8 @@ errors ── events
    │       │   └────────────── rehypo ──► deepbook_margin (MarginPool / SupplierCap)
    │       │
    │     oracle ──► otc_forward ──► OZ fp_math (SD29x9) + math (mul_div)
+   │                    ▲   ▲
+   │                  rfq   direct   (both reuse open_from_rfq + RfqWitness)
 ```
 
 ---
@@ -303,6 +306,40 @@ style) for streaming scale, reusing `open_from_rfq` verbatim.
 
 ---
 
+## 10b. Direct offer — "type the counterparty's org ID" (BUILT)
+
+For a trader who already knows its counterparty and the terms, the `direct`
+module skips the competitive auction. It is the **mirror of RFQ** — the *commit
+order is flipped* — and reuses `open_from_rfq`/`RfqWitness` with **zero new
+settlement code and no new witness to allowlist**.
+
+```
+propose_direct (proposer)   → shared DirectOffer<C> + proposer IM FIRM-reserved
+                              under RfqWitness, keyed by the offer id   [names ONE counterparty; price FIXED]
+  withdraw_direct / reclaim → release the firm IM                       [pull / permissionless cleanup]
+accept_direct (COUNTERPARTY only) → otc_forward::open_from_rfq:
+                                • reserve acceptor IM (live cap, OtcWitness)
+                                • RE-KEY proposer IM  offer_id→otc_id, RfqWitness→OtcWitness
+                                • share OtcForward<C>                   [both sides bound, ONE signer]
+```
+
+| | RFQ | Direct |
+|---|---|---|
+| Audience | broadcast / N targets | exactly one named `counterparty_inst` |
+| Price | makers compete | fixed by proposer |
+| Commits collateral first | the responder (maker) | the initiator (proposer) |
+| Live signer at open | requester | counterparty |
+| Escape hatches | `withdraw_quote` / `reclaim_expired_quote` | `withdraw_direct` / `reclaim_expired_direct` |
+
+In `accept_direct`, only the institution whose `object::id` equals
+`offer.counterparty_inst` can accept, and the proposer plays `open_from_rfq`'s
+"maker"/pre-committed role while the acceptor plays the "requester"/live role —
+so the same re-key seam binds both legs under a single signer. Money-safety is
+identical to RFQ: a live offer always frees via the proposer's pull or the
+permissionless TTL reclaim.
+
+---
+
 ## 11. Design decisions (with evidence)
 
 | Decision | Choice | Why |
@@ -349,9 +386,9 @@ style) for streaming scale, reusing `open_from_rfq` verbatim.
 
 ## 13. Deployment — LIVE on testnet
 
-The package **builds, unit-tests pass** (8 tests; `contracts/run-tests.sh`), and
-is **deployed to testnet**, with the full rehypothecation loop proven on-chain
-with real DBUSDC.
+The package **builds, unit-tests pass** (12 tests; `contracts/run-tests.sh`), and
+is **deployed to testnet**, with the full rehypothecation loop, the RFQ path, and
+the direct-offer path all proven on-chain with real DBUSDC.
 
 **How the dependency-publish hurdle was solved — MVR.** Publishing links against
 the deployed DeepBook on testnet; the deepbookv3 source revs ship no publish
@@ -366,7 +403,8 @@ does not), so the version is pinned. OZ math stays a git dep (it ships
 
 | Object | ID |
 |---|---|
-| Package (current) | `0x7106aeb00de8f07c4f5c28e1fc7b13b03e42e474e6221db81e81b09ca80b561e` (upgrade w/ RFQ) |
+| Package (current) | `0xbbf751ec720828c7ca39efefcd246c43c86e46ae310218a420c00aaf27b5b7fa` (upgrade w/ direct offer) |
+| Package (prev — RFQ) | `0x7106aeb00de8f07c4f5c28e1fc7b13b03e42e474e6221db81e81b09ca80b561e` |
 | Package (original-id) | `0x3dfbfa5254f00a0b501ebfdf449f044340e09f0629b37dfa7d834130157dfddf` |
 | UpgradeCap (owner) | `0xbe6518c77007f7fb3940faed2b4b3bf5ec8a6a7fcc653f66eeee548614149fe2` |
 | OtcAllowlist (shared) | `0x6adb6cb2a30e37a9255138a56981516f1267d2284fc06f28917034ad7413e68a` |
@@ -376,11 +414,18 @@ does not), so the version is pinned. OZ math stays a git dep (it ships
 | OracleAdminCap (owner) | `0x33adac6f64ae3ecb1af395de98f9a4f0708d1d97f4848a32dc428a7b9e651b87` |
 | UpgradeCap (owner) | `0xbe6518c77007f7fb3940faed2b4b3bf5ec8a6a7fcc653f66eeee548614149fe2` |
 
-**Proven loop** (`scripts/deploy-test.ts`): create institution → deposit 50
-DBUSDC → `rehypothecate` into the live DBUSDC margin pool (`0xf08568…`) →
-register an oracle feed + push a crash price (latch the trigger) →
-`recall_on_trigger` pulls the 50 DBUSDC back. Observed: `rehypothecated`
-50→0 and liquid treasury 0→50 across the recall.
+**Proven loops:**
+- `scripts/deploy-test.ts` — create institution → deposit 50 DBUSDC →
+  `rehypothecate` into the live DBUSDC margin pool (`0xf08568…`) → register an
+  oracle feed + push a crash price (latch the trigger) → `recall_on_trigger`
+  pulls the 50 DBUSDC back. Observed: `rehypothecated` 50→0 and liquid treasury
+  0→50 across the recall.
+- `scripts/two-inst-rfq.ts` — two institutions (Goldwoman ↔ Cumberland), 100
+  DBUSDC each: `open_rfq` → `submit_quote` (firm-reserve 20) → `accept_quote`
+  opens the OtcForward, single signer. Both legs reserved 20.
+- `scripts/two-inst-direct.ts` — same two desks via the **direct** path:
+  `propose_direct` (proposer firm-reserves 20) → `accept_direct` by the named
+  counterparty opens the OtcForward. Both legs reserved 20.
 
 ---
 
@@ -406,4 +451,5 @@ register an oracle feed + push a crash price (latch the trigger) →
 |---|---|
 | 2026-06-16 | Initial architecture: onboarding (institution/protocol/registry/settlement), oracle, rehypo (DeepBook), otc_forward. 8 tests pass. |
 | 2026-06-16 | **Deployed to testnet** via MVR (`@deepbook/margin-trading/13`). Rehypothecate→trigger→recall loop proven on-chain with 50 real DBUSDC. |
-| 2026-06-16 | **RFQ module added** (on-chain firm quotes; firm-reserve-at-quote + re-key-at-accept solves single-signer async open). 10/10 tests. Package **upgraded** on testnet (via SDK — CLI is older than testnet protocol v126); OtcWitness + RfqWitness allowlisted. |
+| 2026-06-16 | **RFQ module added** (on-chain firm quotes; firm-reserve-at-quote + re-key-at-accept solves single-signer async open). 10/10 tests. Package **upgraded** on testnet (via SDK — CLI is older than testnet protocol v126); OtcWitness + RfqWitness allowlisted. Two-institution RFQ proven live (`two-inst-rfq.ts`). |
+| 2026-06-16 | **Direct-offer module added** (`direct.move`) — the "type the counterparty's org ID" path; mirror of RFQ (proposer commits first), reuses `open_from_rfq`/`RfqWitness` so no new settlement code or allowlist entry. 12/12 tests. Package **upgraded** (`0xbbf751ec…`); two-institution direct offer proven live (`two-inst-direct.ts`). |

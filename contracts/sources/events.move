@@ -372,3 +372,75 @@ public(package) fun emit_rfq_filled(
 public(package) fun emit_rfq_cancelled(rfq_id: ID, requester_inst: ID, by: address) {
     event::emit(RfqCancelled { rfq_id, requester_inst, by });
 }
+
+// ----- direct offer (bilateral, no competitive quoting) -----
+
+public struct DirectOffered has copy, drop {
+    offer_id: ID,
+    proposer_inst: ID,
+    counterparty_inst: ID,
+    proposer_trader: address,
+    proposer_side: u8,
+    underlying: String,
+    notional: u64,
+    entry_price: u64,
+    im_each: u64,
+    offer_expiry_ms: u64,
+    by: address,
+}
+public struct DirectAccepted has copy, drop {
+    offer_id: ID,
+    otc_id: ID,
+    proposer_inst: ID,
+    counterparty_inst: ID,
+    entry_price: u64,
+    im_each: u64,
+    by: address,
+}
+public struct DirectWithdrawn has copy, drop { offer_id: ID, proposer_inst: ID, freed: u64, by: address }
+public struct DirectReclaimed has copy, drop { offer_id: ID, proposer_inst: ID, freed: u64, by: address }
+
+public(package) fun emit_direct_offered(
+    offer_id: ID,
+    proposer_inst: ID,
+    counterparty_inst: ID,
+    proposer_trader: address,
+    proposer_side: u8,
+    underlying: String,
+    notional: u64,
+    entry_price: u64,
+    im_each: u64,
+    offer_expiry_ms: u64,
+    by: address,
+) {
+    event::emit(DirectOffered {
+        offer_id,
+        proposer_inst,
+        counterparty_inst,
+        proposer_trader,
+        proposer_side,
+        underlying,
+        notional,
+        entry_price,
+        im_each,
+        offer_expiry_ms,
+        by,
+    });
+}
+public(package) fun emit_direct_accepted(
+    offer_id: ID,
+    otc_id: ID,
+    proposer_inst: ID,
+    counterparty_inst: ID,
+    entry_price: u64,
+    im_each: u64,
+    by: address,
+) {
+    event::emit(DirectAccepted { offer_id, otc_id, proposer_inst, counterparty_inst, entry_price, im_each, by });
+}
+public(package) fun emit_direct_withdrawn(offer_id: ID, proposer_inst: ID, freed: u64, by: address) {
+    event::emit(DirectWithdrawn { offer_id, proposer_inst, freed, by });
+}
+public(package) fun emit_direct_reclaimed(offer_id: ID, proposer_inst: ID, freed: u64, by: address) {
+    event::emit(DirectReclaimed { offer_id, proposer_inst, freed, by });
+}

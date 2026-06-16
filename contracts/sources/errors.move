@@ -73,6 +73,14 @@ const ENotQuoteOwner: u64 = 102;
 const EBadParams: u64 = 103;
 const EReservationMismatch: u64 = 104; // rekey magnitudes != expected
 
+// --- direct offer (110–119) ---
+const EOfferNotLive: u64 = 110;
+const EOfferExpired: u64 = 111;
+const EOfferNotExpired: u64 = 112;
+const ENotCounterparty: u64 = 113; // accept by an institution other than the named counterparty
+const ENotProposer: u64 = 114; // withdraw by a trader other than the proposer
+const EWrongProposerInst: u64 = 115; // proposer Institution arg != offer.proposer_inst
+
 public(package) fun e_wrong_institution(): u64 { EWrongInstitution }
 public(package) fun e_admin_revoked(): u64 { EAdminRevoked }
 public(package) fun e_cap_revoked(): u64 { ECapRevoked }
@@ -123,3 +131,9 @@ public(package) fun e_quote_outlives_rfq(): u64 { EQuoteOutlivesRfq }
 public(package) fun e_not_quote_owner(): u64 { ENotQuoteOwner }
 public(package) fun e_bad_params(): u64 { EBadParams }
 public(package) fun e_reservation_mismatch(): u64 { EReservationMismatch }
+public(package) fun e_offer_not_live(): u64 { EOfferNotLive }
+public(package) fun e_offer_expired(): u64 { EOfferExpired }
+public(package) fun e_offer_not_expired(): u64 { EOfferNotExpired }
+public(package) fun e_not_counterparty(): u64 { ENotCounterparty }
+public(package) fun e_not_proposer(): u64 { ENotProposer }
+public(package) fun e_wrong_proposer_inst(): u64 { EWrongProposerInst }
