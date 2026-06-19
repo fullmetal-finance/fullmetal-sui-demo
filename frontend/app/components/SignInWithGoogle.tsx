@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import {
   useCurrentAccount,
   useDAppKit,
@@ -12,7 +13,11 @@ const GOOGLE_WALLET_NAME = "Sign in with Google";
 
 /** Reusable Google zkLogin sign-in. `variant="nav"` is the small header pill;
     `variant="cta"` is the prominent onboarding button. No seed phrase, no wallet
-    popup — Enoki derives a Sui address from the Google identity. */
+    popup — Enoki derives a Sui address from the Google identity.
+
+    Wallet state only exists in the browser, so everything wallet-dependent is
+    gated behind `mounted`: the server and first client paint render an identical
+    disabled, signed-out button (no hydration mismatch), then it goes live. */
 export default function SignInWithGoogle({
   variant = "nav",
   label = "Sign in with Google",
@@ -23,10 +28,15 @@ export default function SignInWithGoogle({
   const dAppKit = useDAppKit();
   const wallets = useWallets();
   const account = useCurrentAccount();
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
 
-  const googleWallet = wallets.find((w) => w.name === GOOGLE_WALLET_NAME);
+  const googleWallet = mounted
+    ? wallets.find((w) => w.name === GOOGLE_WALLET_NAME)
+    : undefined;
 
-  if (account) {
+  // Signed-in view (only after mount; the server never has an account).
+  if (mounted && account) {
     const short = `${account.address.slice(0, 6)}…${account.address.slice(-4)}`;
     if (variant === "cta") {
       return (
@@ -54,13 +64,15 @@ export default function SignInWithGoogle({
     );
   }
 
+  // Signed-out view. Disabled until the Enoki wallet is registered in-browser.
+  const disabled = !mounted || !googleWallet;
   const onClick = () =>
     googleWallet && dAppKit.connectWallet({ wallet: googleWallet });
 
   if (variant === "cta") {
     return (
       <button
-        disabled={!googleWallet}
+        disabled={disabled}
         onClick={onClick}
         className="flex w-full items-center justify-center gap-3 rounded-[7px] border-[0.5px] border-line-strong bg-ink px-4 py-3 text-[14px] text-bg transition-opacity hover:opacity-90 disabled:opacity-40"
       >
@@ -72,7 +84,7 @@ export default function SignInWithGoogle({
 
   return (
     <button
-      disabled={!googleWallet}
+      disabled={disabled}
       onClick={onClick}
       className="rounded-[7px] border-[0.5px] border-line px-4 py-2 text-[12px] tracking-[0.08em] text-ink transition-opacity disabled:opacity-40"
     >

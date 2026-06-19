@@ -6,6 +6,7 @@ import { SITE } from "@/lib/site";
    Grayscale art on near-white, so `dark:invert` covers dark mode. */
 
 const SIZES = {
+  lg: "h-16 w-[248px]",
   md: "h-10 w-[155px] sm:h-12 sm:w-[186px]",
   sm: "h-8 w-[124px]",
 } as const;
@@ -25,7 +26,7 @@ export default function Logo({
           alt={`${SITE.name} logo`}
           fill
           priority
-          sizes="186px"
+          sizes="248px"
           className="object-cover object-center dark:invert"
         />
       </span>
