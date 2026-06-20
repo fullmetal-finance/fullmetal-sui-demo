@@ -4,9 +4,9 @@
 /*  demo has ONE source of truth. Keep in sync with ARCHITECTURE.md §13. */
 /* ------------------------------------------------------------------ */
 
-/** Current deployed package (upgrade w/ direct offer). */
+/** Current deployed package (upgrade w/ rehypo recall-rounding fix). */
 export const PACKAGE =
-  "0xbbf751ec720828c7ca39efefcd246c43c86e46ae310218a420c00aaf27b5b7fa";
+  "0x53ed96a991241db1e20c964930f1e9981c2db438f74dc17867f9705bd8b392b0";
 
 /** Original package id — stable across upgrades; witness type-names key on it. */
 export const ORIGINAL_PACKAGE =
@@ -40,11 +40,19 @@ export const DECIMALS = 6;
 export const UNIT = 1_000_000; // 1e6
 
 /** Protocol collateral floor (demo). IM (each side) must be ≥ max(this, IM% × notional). */
-export const PROTOCOL_MIN_IM = 10; // USD
-export const MIN_IM_PCT = 0.1; // ≥10% of notional ⇒ ≤10× leverage
+export const PROTOCOL_MIN_IM = 1; // USD (demo floor; on-chain only requires im > 0)
+export const MIN_IM_PCT = 0.05; // ≥5% of notional ⇒ up to 20× leverage
 export const MAINTENANCE_PCT = 0.7; // MM = 70% of IM (MAINTENANCE_BPS = 7000 on-chain)
 
 export const INTERVAL_MS = { hourly: 3_600_000, daily: 86_400_000 } as const;
+
+/** Demo underlying — SPCX (SpaceX), freshly public + volatile. Marks in USD. */
+export const SPCX = {
+  symbol: "SPCX",
+  label: "SpaceX",
+  initialMark: 185,
+  spikeMark: 240, // +29% > 15% trigger threshold → latches the oracle
+} as const;
 
 /** Fully-qualified Move-call targets, grouped by module. */
 export const TARGET = {
@@ -84,6 +92,11 @@ export const TARGET = {
   oracle: {
     pushPrice: `${PACKAGE}::oracle::push_price`,
     clearTrigger: `${PACKAGE}::oracle::clear_trigger`,
+    registerFeed: `${PACKAGE}::oracle::register_feed`,
+    mintKeeperCap: `${PACKAGE}::oracle::mint_keeper_cap`,
+    price: `${PACKAGE}::oracle::price`,
+    isTriggered: `${PACKAGE}::oracle::is_triggered`,
+    hasFeed: `${PACKAGE}::oracle::has_feed`,
   },
   registry: {
     resolve: `${PACKAGE}::registry::resolve`,

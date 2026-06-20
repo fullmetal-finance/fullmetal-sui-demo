@@ -5,6 +5,7 @@ import { useCurrentAccount } from "@mysten/dapp-kit-react";
 import { Transaction } from "@mysten/sui/transactions";
 
 import { CLOCK, DBUSDC_TYPE, SHARED, TARGET, toUnits } from "./fullmetal";
+import { useRehypothecate } from "./rehypo-actions";
 import { useSponsoredExecute } from "./sponsored";
 import { createdId, suiRead } from "./sui";
 import { loadInstitution, saveInstitution } from "./store";
@@ -22,6 +23,7 @@ export type OtcDraft = {
   settlementMs: number;
   contractExpiryMs: number; // absolute ms (0 = perpetual)
   offerTtlMs: number;
+  rehypo: boolean; // deploy the posted IM to DeepBook on open
 };
 
 export type OtcResult = { digest: string; offerId: string; kind: "direct" | "rfq" };
@@ -32,6 +34,7 @@ export type OtcResult = { digest: string; offerId: string; kind: "direct" | "rfq
 export function useCreateOtc() {
   const account = useCurrentAccount();
   const sponsoredExecute = useSponsoredExecute();
+  const rehypothecate = useRehypothecate();
 
   return useCallback(
     async (d: OtcDraft): Promise<OtcResult> => {
@@ -99,6 +102,14 @@ export function useCreateOtc() {
           });
         });
         const offerId = await createdOf(digest, "::direct::DirectOffer<");
+        // default behaviour: the posted IM is rehypothecated to DeepBook on open
+        if (d.rehypo && d.im > 0) {
+          try {
+            await rehypothecate(Math.floor(d.im * 100) / 100);
+          } catch {
+            /* non-fatal — the desk can deploy manually from the collateral engine */
+          }
+        }
         return { digest, offerId, kind: "direct" };
       }
 
@@ -127,6 +138,9 @@ export function useCreateOtc() {
         });
       });
       const offerId = await createdOf(digest, "::rfq::Rfq<");
+      // remember the RFQ so the inbox can pull its competing quotes
+      const cur = loadInstitution(account.address);
+      if (cur) saveInstitution(account.address, { ...cur, rfqIds: [...(cur.rfqIds ?? []), offerId] });
       return { digest, offerId, kind: "rfq" };
     },
     [account, sponsoredExecute],

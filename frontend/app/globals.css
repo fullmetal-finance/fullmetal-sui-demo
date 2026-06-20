@@ -14,10 +14,10 @@
   --line-strong: rgba(0, 0, 0, 0.22);
 
   /* ink / text */
-  --ink: #141414;
-  --ink-soft: #4a4843;
-  --muted: #807e76;
-  --faint: rgba(20, 20, 20, 0.38);
+  --ink: #0f0f0f;
+  --ink-soft: #322f29;
+  --muted: #524f47;
+  --faint: rgba(20, 20, 20, 0.55);
 
   /* radii */
   --radius-sm: 7px;
@@ -31,10 +31,10 @@
     --line: rgba(255, 255, 255, 0.09);
     --line-strong: rgba(255, 255, 255, 0.22);
 
-    --ink: #f2efe7;
-    --ink-soft: #b0aea6;
-    --muted: #8a8881;
-    --faint: rgba(236, 233, 225, 0.4);
+    --ink: #f6f3ec;
+    --ink-soft: #d2d0c8;
+    --muted: #a8a69e;
+    --faint: rgba(236, 233, 225, 0.62);
   }
 }
 
@@ -63,7 +63,9 @@ body {
   background: var(--bg);
   color: var(--ink);
   font-family: var(--font-sans), system-ui, sans-serif;
-  line-height: 2.00;
+  font-weight: 450;
+  line-height: 1.6;
+  letter-spacing: -0.003em;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
@@ -74,10 +76,11 @@ body {
   align-items: center;
   gap: 8px;
   font-family: var(--font-mono), ui-monospace, monospace;
-  font-size: 13px;
-  letter-spacing: 0.22em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.2em;
   text-transform: uppercase;
-  color: var(--muted);
+  color: var(--ink-soft);
 }
 .eyebrow::before {
   content: "";
@@ -87,8 +90,21 @@ body {
   display: inline-block;
 }
 
+/* Collateral-flow conduit: a dashed line whose offset animates to read as flow. */
+@keyframes fm-flow-right { to { stroke-dashoffset: -1000; } }
+@keyframes fm-flow-left { to { stroke-dashoffset: 1000; } }
+.fm-flow-right { animation: fm-flow-right 1.1s linear infinite; }
+.fm-flow-left { animation: fm-flow-left 1.1s linear infinite; }
+
+@keyframes fm-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+.fm-pulse { animation: fm-pulse 2s ease-in-out infinite; }
+
+@keyframes fm-banner-in { from { transform: translateY(-100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+.fm-banner-in { animation: fm-banner-in 0.25s ease-out; }
+
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
   }
+  .fm-flow-right, .fm-flow-left, .fm-pulse, .fm-banner-in { animation: none; }
 }

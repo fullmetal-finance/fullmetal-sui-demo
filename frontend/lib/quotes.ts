@@ -4,6 +4,7 @@ import { useCallback } from "react";
 import { useCurrentAccount } from "@mysten/dapp-kit-react";
 
 import { CLOCK, DBUSDC_TYPE, SHARED, TARGET } from "./fullmetal";
+import { useRehypothecate } from "./rehypo-actions";
 import { useSponsoredExecute } from "./sponsored";
 import { createdId, suiRead } from "./sui";
 import { loadInstitution } from "./store";
@@ -36,6 +37,7 @@ export async function readQuote(id: string): Promise<QuoteInfo> {
 export function useAcceptQuote() {
   const account = useCurrentAccount();
   const sponsoredExecute = useSponsoredExecute();
+  const rehypothecate = useRehypothecate();
 
   return useCallback(
     async (quoteId: string): Promise<{ digest: string; otcId: string }> => {
@@ -67,7 +69,16 @@ export function useAcceptQuote() {
         digest,
         options: { showObjectChanges: true },
       });
-      return { digest, otcId: createdId(full, "::otc_forward::OtcForward<") };
+      const otcId = createdId(full, "::otc_forward::OtcForward<");
+      // default behaviour: the posted IM is rehypothecated to DeepBook on open
+      if (q.imEach > 0) {
+        try {
+          await rehypothecate(Math.floor(q.imEach * 100) / 100);
+        } catch {
+          /* non-fatal — deployable manually from the collateral engine */
+        }
+      }
+      return { digest, otcId };
     },
     [account, sponsoredExecute],
   );

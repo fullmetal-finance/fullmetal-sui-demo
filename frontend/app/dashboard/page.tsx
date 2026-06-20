@@ -7,13 +7,19 @@ import { useCurrentAccount } from "@mysten/dapp-kit-react";
 import Logo from "../components/Logo";
 import SignInWithGoogle from "../components/SignInWithGoogle";
 import CreateOtcModal from "../components/CreateOtcModal";
-import AcceptQuote from "../components/AcceptQuote";
+import LoadUsdModal from "../components/LoadUsdModal";
+import RehypoHero from "../components/RehypoHero";
+import Blotter from "../components/Blotter";
+import TradersPanel from "../components/TradersPanel";
+import QuotesInbox from "../components/QuotesInbox";
 import { DBUSDC_TYPE, TARGET, explorer, usd } from "@/lib/fullmetal";
-import { loadInstitution, type InstitutionRecord } from "@/lib/store";
-import { readInstitution, type InstState } from "@/lib/institution-state";
+import { loadInstitution, saveInstitution, saveQuotes, type InstitutionRecord } from "@/lib/store";
+import { readInstitution, readUserContracts, type InstState } from "@/lib/institution-state";
 import { useSponsoredExecute } from "@/lib/sponsored";
+import type { OtcResult } from "@/lib/otc";
+import type { MockPosition } from "@/lib/mock";
 
-const LOAD_AMOUNT = 50;
+type Tab = "positions" | "engine" | "rfq";
 
 export default function Dashboard() {
   const account = useCurrentAccount();
@@ -21,9 +27,11 @@ export default function Dashboard() {
   const [mounted, setMounted] = useState(false);
   const [rec, setRec] = useState<InstitutionRecord | null>(null);
   const [state, setState] = useState<InstState | null>(null);
+  const [positions, setPositions] = useState<MockPosition[]>([]);
+  const [tab, setTab] = useState<Tab>("positions");
   const [otcOpen, setOtcOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [loadOpen, setLoadOpen] = useState(false);
+  const [makersBusy, setMakersBusy] = useState(false);
 
   useEffect(() => {
     setMounted(true);
@@ -34,161 +42,199 @@ export default function Dashboard() {
     try {
       setState(await readInstitution(id));
     } catch {
-      /* transient RPC */
+      /* transient */
     }
   }, []);
 
+  // re-poll a few times after an action so the UI catches up to propagation
+  // instead of needing a manual refresh
+  const sync = useCallback(
+    async (id: string) => {
+      for (let i = 0; i < 4; i++) {
+        await refresh(id);
+        if (i < 3) await new Promise((r) => setTimeout(r, 1000));
+      }
+    },
+    [refresh],
+  );
+
+  // keep balances live without a manual refresh
   useEffect(() => {
-    if (rec) refresh(rec.institutionId);
+    if (!rec) return;
+    refresh(rec.institutionId);
+    const t = setInterval(() => refresh(rec.institutionId), 4000);
+    return () => clearInterval(t);
   }, [rec, refresh]);
 
-  async function loadUsd() {
-    if (!account || !rec) return;
-    setError(null);
-    setBusy(true);
-    try {
-      // 1) mock fiat on-ramp — faucet DBUSDC into the signed-in address
-      const r = await fetch("/api/faucet", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ to: account.address, amount: LOAD_AMOUNT }),
-      });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error ?? "faucet failed");
-      if (!d.coinId) throw new Error("faucet did not return a coin");
+  // record the desk's real on-chain contracts in the blotter
+  useEffect(() => {
+    if (!rec?.otcIds?.length) return;
+    readUserContracts(rec.otcIds, rec.institutionId).then(setPositions).catch(() => {});
+  }, [rec]);
 
-      // 2) gasless deposit of the exact faucet coin into the institution treasury
-      await sponsoredExecute((tx) => {
-        tx.moveCall({
-          target: TARGET.institution.deposit,
-          typeArguments: [DBUSDC_TYPE],
-          arguments: [tx.object(rec.institutionId), tx.object(rec.adminCapId), tx.object(d.coinId)],
-        });
+  const reload = useCallback(() => {
+    if (account) {
+      const r = loadInstitution(account.address);
+      setRec(r);
+      if (r) refresh(r.institutionId);
+    }
+  }, [account, refresh]);
+
+  async function fund(amount: number) {
+    if (!account || !rec) throw new Error("No institution.");
+    const r = await fetch("/api/faucet", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ to: account.address, amount }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error ?? "faucet failed");
+    if (!d.coinId) throw new Error("faucet did not return a coin");
+    await sponsoredExecute((tx) => {
+      tx.moveCall({
+        target: TARGET.institution.deposit,
+        typeArguments: [DBUSDC_TYPE],
+        arguments: [tx.object(rec.institutionId), tx.object(rec.adminCapId), tx.object(d.coinId)],
       });
-      await refresh(rec.institutionId);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
+    });
+    await sync(rec.institutionId);
+  }
+
+  async function onOtcCreated(res: OtcResult) {
+    reload();
+    if (rec) sync(rec.institutionId);
+    if (res.kind === "rfq") {
+      setTab("rfq");
+      setMakersBusy(true);
+      try {
+        const r = await fetch("/api/makers", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ rfqId: res.offerId }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok && d.quotes?.length) saveQuotes(res.offerId, d.quotes);
+      } catch {
+        /* makers offline — inbox shows preview */
+      } finally {
+        setMakersBusy(false);
+      }
     }
   }
 
   return (
-    <div>
-      <header className="w-full border-b-[0.5px] border-line bg-surface">
-        <div className="mx-auto flex w-full max-w-[1120px] items-center justify-between px-4 py-3 sm:px-6">
+    <div className="min-h-screen">
+      <header className="w-full border-b border-line-strong bg-surface">
+        <div className="mx-auto flex w-full max-w-[1320px] items-center justify-between px-6 py-3 sm:px-10">
           <Logo size="lg" />
           <SignInWithGoogle variant="nav" />
         </div>
       </header>
 
-      <main className="mx-auto w-full max-w-[1120px] px-4 py-12 sm:px-6 lg:py-16">
+      <main className="mx-auto w-full max-w-[1320px] px-6 py-10 sm:px-10 lg:py-12">
         {!mounted ? null : !account ? (
           <Empty title="Sign in to view your desk" cta={<Link href="/onboarding" className={linkCls}>Go to onboarding</Link>} />
         ) : !rec ? (
           <Empty title="No institution yet" cta={<Link href="/onboarding" className={linkCls}>Create one →</Link>} />
         ) : (
-          <section className="max-w-[820px]">
-            <div className="flex items-start justify-between gap-4">
+          <>
+            <div className="flex flex-wrap items-end justify-between gap-4">
               <div>
-                <span className="eyebrow">Treasury</span>
-                <h1 className="mt-5 text-3xl tracking-[-0.01em]">{rec.profile.legalName || rec.handle}</h1>
-                <p className="mt-2 font-mono text-[13px] text-muted">@{rec.handle}</p>
+                <span className="eyebrow">Institutional desk</span>
+                <h1 className="mt-4 text-[34px] font-semibold leading-[1.05] tracking-[-0.02em]">{rec.profile.legalName || rec.handle}</h1>
+                <div className="mt-2 flex items-center gap-3 font-mono text-[12px] text-muted">
+                  <span className="flex items-center gap-1.5 text-ink"><span className="h-[6px] w-[6px] rounded-full bg-[#1f6f4d]" /> LIVE</span>
+                  <span>@{rec.handle}</span>
+                  <a href={explorer.object(rec.institutionId)} target="_blank" rel="noreferrer" className="underline hover:text-ink">inst {rec.institutionId.slice(0, 6)}… ↗</a>
+                </div>
               </div>
-              <div className="flex shrink-0 gap-2">
-                <button
-                  onClick={loadUsd}
-                  disabled={busy}
-                  className="rounded-[7px] border-[0.5px] border-line-strong px-4 py-2.5 text-[13px] text-ink transition-colors hover:bg-surface disabled:opacity-40"
-                >
-                  {busy ? "Loading…" : `Load $${LOAD_AMOUNT} USD`}
-                </button>
-                <button
-                  onClick={() => setOtcOpen(true)}
-                  className="rounded-[7px] border-[0.5px] border-line-strong bg-ink px-4 py-2.5 text-[13px] text-bg transition-opacity hover:opacity-90"
-                >
-                  New OTC contract →
-                </button>
+              <div className="flex gap-2.5">
+                <button onClick={() => setLoadOpen(true)} className="rounded-[8px] border border-line-strong px-4 py-2.5 text-[13px] font-medium text-ink transition-colors hover:bg-surface">Load funds</button>
+                <button onClick={() => setOtcOpen(true)} className="rounded-[8px] border border-line-strong bg-ink px-4 py-2.5 text-[13px] font-semibold text-bg transition-opacity hover:opacity-90">New OTC contract →</button>
               </div>
             </div>
 
-            {error && <p className="mt-4 break-words text-[12px] text-[#b4341f]">{error}</p>}
-
-            {/* live balances */}
-            <div className="mt-8 grid gap-4 sm:grid-cols-4">
-              <Stat label="Equity" value={state ? usd(state.equity) : "—"} accent />
-              <Stat label="Available" value={state ? usd(state.available) : "—"} />
-              <Stat label="Reserved IM" value={state ? usd(state.reserved) : "—"} />
-              <Stat label="Rehypothecated" value={state ? usd(state.rehypothecated) : "—"} sub="earning yield" />
+            {/* treasury strip */}
+            <div className="mt-8 grid grid-cols-2 gap-4 lg:grid-cols-4">
+              <BigStat label="Equity" value={state ? usd(state.equity) : "—"} accent />
+              <BigStat label="Available" value={state ? usd(state.available) : "—"} />
+              <BigStat label="Reserved IM" value={state ? usd(state.reserved) : "—"} />
+              <BigStat label="Rehypothecated" value={state ? usd(state.rehypothecated) : "—"} sub="in DeepBook" />
             </div>
 
-            {/* identity */}
-            <div className="mt-4 grid gap-4 sm:grid-cols-3">
-              <Stat label="Institution" value={short(rec.institutionId)} href={explorer.object(rec.institutionId)} />
-              <Stat label="Admin capability" value={short(rec.adminCapId)} href={explorer.object(rec.adminCapId)} />
-              <Stat label="Created (tx)" value={short(rec.txDigest)} href={explorer.tx(rec.txDigest)} />
+            {/* tabs — full-width, three separated buttons */}
+            <div className="mt-8 grid w-full grid-cols-1 gap-3 sm:grid-cols-3">
+              <TabBtn active={tab === "positions"} onClick={() => setTab("positions")}>Positions &amp; traders</TabBtn>
+              <TabBtn active={tab === "engine"} onClick={() => setTab("engine")}>Collateral engine</TabBtn>
+              <TabBtn active={tab === "rfq"} onClick={() => setTab("rfq")}>
+                RFQ inbox{makersBusy && <span className="ml-1.5 inline-block h-[5px] w-[5px] animate-pulse rounded-full bg-[#1f6f4d]" />}
+              </TabBtn>
             </div>
 
-            {state && state.liquid === 0 && state.reserved === 0 && (
-              <p className="mt-6 text-[13px] leading-[1.7] text-muted">
-                Treasury is empty — hit <span className="text-ink">Load ${LOAD_AMOUNT} USD</span> to mint DBUSDC in, then open a contract.
-              </p>
-            )}
-
-            <AcceptQuote onAccepted={() => refresh(rec.institutionId)} />
-          </section>
+            <div className="mt-6">
+              {tab === "positions" && (
+                <div className="space-y-6">
+                  <Blotter real={positions} />
+                  <TradersPanel />
+                </div>
+              )}
+              {tab === "engine" && (
+                <RehypoHero instId={rec.institutionId} state={state} onRefresh={() => sync(rec.institutionId)} />
+              )}
+              {tab === "rfq" && (
+                <QuotesInbox
+                  rfqIds={rec.rfqIds ?? []}
+                  loading={makersBusy}
+                  onAccepted={(otcId) => {
+                    if (account) {
+                      const next = { ...rec, otcIds: [...(rec.otcIds ?? []), otcId] };
+                      saveInstitution(account.address, next);
+                      setRec(next);
+                    }
+                    reload();
+                  }}
+                />
+              )}
+            </div>
+          </>
         )}
       </main>
 
-      <CreateOtcModal
-        open={otcOpen}
-        onClose={() => setOtcOpen(false)}
-        onCreated={() => rec && refresh(rec.institutionId)}
-      />
+      <CreateOtcModal open={otcOpen} onClose={() => setOtcOpen(false)} onCreated={onOtcCreated} />
+      <LoadUsdModal open={loadOpen} onClose={() => setLoadOpen(false)} fund={fund} />
     </div>
   );
 }
 
-function Stat({
-  label,
-  value,
-  sub,
-  href,
-  accent,
-}: {
-  label: string;
-  value: string;
-  sub?: string;
-  href?: string;
-  accent?: boolean;
-}) {
-  const body = (
-    <>
-      <p className="text-[11px] uppercase tracking-[0.14em] text-muted">{label}</p>
-      <p className={`mt-2 font-mono text-[15px] ${accent ? "text-ink" : "text-ink"}`}>{value}</p>
-      {sub && <p className="mt-1 text-[12px] text-faint">{sub}</p>}
-    </>
+function TabBtn({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`rounded-[11px] border px-4 py-3.5 text-center text-[14px] font-semibold transition-colors ${active ? "border-line-strong bg-ink text-bg" : "border-line-strong bg-surface text-ink-soft hover:bg-bg hover:text-ink"}`}
+    >
+      {children}
+    </button>
   );
-  const cls = `block rounded-[12px] border-[0.5px] bg-surface p-5 ${accent ? "border-line-strong" : "border-line"}`;
-  return href ? (
-    <a href={href} target="_blank" rel="noreferrer" className={`${cls} transition-colors hover:border-line-strong`}>
-      {body}
-    </a>
-  ) : (
-    <div className={cls}>{body}</div>
+}
+
+function BigStat({ label, value, sub, accent }: { label: string; value: string; sub?: string; accent?: boolean }) {
+  return (
+    <div className={`rounded-[14px] border bg-surface px-6 py-5 ${accent ? "border-line-strong" : "border-line"}`}>
+      <p className="text-[11px] font-semibold uppercase tracking-[0.13em] text-muted">{label}</p>
+      <p className="mt-2.5 font-mono text-[26px] font-semibold tracking-[-0.01em] text-ink">{value}</p>
+      {sub && <p className="mt-0.5 text-[12px] text-muted">{sub}</p>}
+    </div>
   );
 }
 
 function Empty({ title, cta }: { title: string; cta: React.ReactNode }) {
   return (
     <div className="flex min-h-[40vh] flex-col items-start justify-center">
-      <h1 className="text-2xl tracking-[-0.01em]">{title}</h1>
+      <h1 className="text-2xl font-semibold tracking-[-0.01em]">{title}</h1>
       <div className="mt-6">{cta}</div>
     </div>
   );
 }
 
 const linkCls =
-  "rounded-[7px] border-[0.5px] border-line-strong px-4 py-2.5 text-[14px] text-ink transition-colors hover:bg-surface";
-
-const short = (id: string) => `${id.slice(0, 8)}…${id.slice(-6)}`;
+  "rounded-[8px] border border-line-strong px-4 py-2.5 text-[14px] font-medium text-ink transition-colors hover:bg-surface";

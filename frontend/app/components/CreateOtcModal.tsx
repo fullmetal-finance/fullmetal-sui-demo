@@ -26,10 +26,10 @@ export default function CreateOtcModal({
   const [entry, setEntry] = useState<"direct" | "rfq">("direct");
   const [counterparty, setCounterparty] = useState("");
   const [side, setSide] = useState<"long" | "short">("long");
-  const [asset, setAsset] = useState("SUI");
-  const [notional, setNotional] = useState(50);
-  const [strike, setStrike] = useState(2.0);
-  const [im, setIm] = useState(10);
+  const [asset, setAsset] = useState("SPCX");
+  const [notional, setNotional] = useState(1);
+  const [strike, setStrike] = useState(185);
+  const [im, setIm] = useState(5);
   const [imTouched, setImTouched] = useState(false);
   const [offerMins, setOfferMins] = useState(60);
   const [maturityDays, setMaturityDays] = useState(7);
@@ -75,6 +75,7 @@ export default function CreateOtcModal({
         settlementMs: INTERVAL_MS[interval],
         contractExpiryMs: Date.now() + maturityDays * INTERVAL_MS.daily,
         offerTtlMs: offerMins * 60_000,
+        rehypo,
       });
       setDone(r);
       onCreated?.(r);
@@ -157,7 +158,7 @@ export default function CreateOtcModal({
             <Section label="Economics">
               <div className="grid gap-4 sm:grid-cols-2">
                 <Labeled label="Asset">
-                  <input className={input} value={asset} onChange={(e) => setAsset(e.target.value.toUpperCase())} placeholder="SUI" />
+                  <input className={input} value={asset} onChange={(e) => setAsset(e.target.value.toUpperCase())} placeholder="SPCX" />
                 </Labeled>
                 <Labeled label="Notional" hint="units of underlying">
                   <input className={input} type="number" value={notional} onChange={(e) => setNotional(+e.target.value)} />

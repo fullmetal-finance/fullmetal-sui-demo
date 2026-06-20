@@ -21,6 +21,8 @@ export type InstitutionRecord = {
   logo?: string | null;
   txDigest: string;
   createdAt: number;
+  rfqIds?: string[]; // open RFQs this desk has broadcast
+  otcIds?: string[]; // opened OtcForward contracts
 };
 
 const key = (addr: string) => `fullmetal:institution:${addr.toLowerCase()}`;
@@ -39,4 +41,17 @@ export function loadInstitution(addr: string): InstitutionRecord | null {
 export function clearInstitution(addr: string): void {
   if (typeof window === "undefined") return;
   localStorage.removeItem(key(addr));
+}
+
+export type StoredQuote = { org: string; quoteId: string; price: number; im: number; ttl: string };
+
+export function saveQuotes(rfqId: string, quotes: StoredQuote[]): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(`fullmetal:quotes:${rfqId}`, JSON.stringify(quotes));
+}
+
+export function loadQuotes(rfqId: string): StoredQuote[] {
+  if (typeof window === "undefined") return [];
+  const v = localStorage.getItem(`fullmetal:quotes:${rfqId}`);
+  return v ? (JSON.parse(v) as StoredQuote[]) : [];
 }

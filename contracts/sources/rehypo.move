@@ -129,18 +129,31 @@ fun do_recall<C>(
     clock: &Clock,
     ctx: &mut TxContext,
 ): u64 {
+    let principal = institution::rehypothecated_of(inst);
     assert!(amount > 0, errors::e_zero_amount());
-    assert!(amount <= institution::rehypothecated_of(inst), errors::e_recall_too_large());
+    assert!(amount <= principal, errors::e_recall_too_large());
+
+    // DeepBook supply rounds shares DOWN, so the live redeemable value can sit a
+    // hair under the recorded principal; asking the pool for the exact principal
+    // underflows its share math. So: when recalling the whole position, withdraw
+    // ALL (`none` = burn every share); for a partial, clamp to the live value.
+    let cap_id = *institution::rehypo_cap_id(inst).borrow();
+    let live = margin_pool::user_supply_amount<C>(pool, cap_id, clock);
+    let request = if (amount >= live) option::none() else option::some(amount);
+
     let coin = {
         let cap_ref = df::borrow<SupplierCapKey, SupplierCap>(
             institution::uid(inst),
             SupplierCapKey {},
         );
-        margin_pool::withdraw<C>(pool, registry, cap_ref, option::some(amount), clock, ctx)
+        margin_pool::withdraw<C>(pool, registry, cap_ref, request, clock, ctx)
     };
     let got = coin::value(&coin);
     coin::put(institution::treasury_mut(inst), coin);
-    institution::note_recalled(inst, got, ctx);
+    // Reduce the principal mirror by what we accounted as recalled (capped to the
+    // mirror so it never underflows); any rounding dust is realized into equity.
+    let noted = if (amount >= principal) principal else amount;
+    institution::note_recalled(inst, noted, ctx);
     got
 }
 
