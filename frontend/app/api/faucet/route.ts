@@ -50,13 +50,23 @@ export async function POST(request: Request) {
     const res = await client.signAndExecuteTransaction({
       signer: kp,
       transaction: tx,
-      options: { showEffects: true },
+      options: { showEffects: true, showObjectChanges: true },
     });
     await client.waitForTransaction({ digest: res.digest });
     if (res.effects?.status.status !== "success") {
       return Response.json({ error: JSON.stringify(res.effects?.status) }, { status: 502 });
     }
-    return Response.json({ digest: res.digest, amount: amt });
+    // the freshly-split DBUSDC coin now owned by `to` — return it so the deposit
+    // can consume the exact coin (no client-side splitting / framework calls).
+    const coin = (res.objectChanges ?? []).find((o) => {
+      const x = o as { type?: string; objectType?: string; owner?: { AddressOwner?: string } };
+      return (
+        (x.type === "created" || x.type === "transferred") &&
+        (x.objectType ?? "").includes("DBUSDC::DBUSDC>") &&
+        x.owner?.AddressOwner === to
+      );
+    }) as { objectId?: string } | undefined;
+    return Response.json({ digest: res.digest, amount: amt, coinId: coin?.objectId ?? null });
   } catch (e) {
     return Response.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });
   }
