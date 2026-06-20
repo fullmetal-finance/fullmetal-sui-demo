@@ -39,6 +39,13 @@ export const CLOCK = "0x6";
 export const DECIMALS = 6;
 export const UNIT = 1_000_000; // 1e6
 
+/** Protocol collateral floor (demo). IM (each side) must be ≥ max(this, IM% × notional). */
+export const PROTOCOL_MIN_IM = 10; // USD
+export const MIN_IM_PCT = 0.1; // ≥10% of notional ⇒ ≤10× leverage
+export const MAINTENANCE_PCT = 0.7; // MM = 70% of IM (MAINTENANCE_BPS = 7000 on-chain)
+
+export const INTERVAL_MS = { hourly: 3_600_000, daily: 86_400_000 } as const;
+
 /** Fully-qualified Move-call targets, grouped by module. */
 export const TARGET = {
   institution: {
@@ -78,7 +85,16 @@ export const TARGET = {
     pushPrice: `${PACKAGE}::oracle::push_price`,
     clearTrigger: `${PACKAGE}::oracle::clear_trigger`,
   },
+  registry: {
+    resolve: `${PACKAGE}::registry::resolve`,
+  },
 } as const;
+
+/** Every move-call target the app sponsors — passed to Enoki's `sender`-branch
+ *  `allowedMoveCallTargets` so the gas pool only covers Fullmetal calls. */
+export const ALL_MOVE_TARGETS: string[] = Object.values(TARGET).flatMap((m) =>
+  Object.values(m),
+);
 
 /** Object-type strings for filtering `objectChanges` after a tx. */
 export const TYPE = {

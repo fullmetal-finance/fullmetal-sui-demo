@@ -6,6 +6,7 @@ import { useCurrentAccount } from "@mysten/dapp-kit-react";
 
 import Logo from "../components/Logo";
 import SignInWithGoogle from "../components/SignInWithGoogle";
+import CreateOtcModal from "../components/CreateOtcModal";
 import { explorer } from "@/lib/fullmetal";
 import { loadInstitution, type InstitutionRecord } from "@/lib/store";
 
@@ -13,6 +14,7 @@ export default function Dashboard() {
   const account = useCurrentAccount();
   const [mounted, setMounted] = useState(false);
   const [rec, setRec] = useState<InstitutionRecord | null>(null);
+  const [otcOpen, setOtcOpen] = useState(false);
 
   useEffect(() => {
     setMounted(true);
@@ -41,9 +43,19 @@ export default function Dashboard() {
           />
         ) : (
           <section className="max-w-[760px]">
-            <span className="eyebrow">Treasury</span>
-            <h1 className="mt-5 text-3xl tracking-[-0.01em]">{rec.profile.legalName || rec.handle}</h1>
-            <p className="mt-2 font-mono text-[13px] text-muted">@{rec.handle}</p>
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <span className="eyebrow">Treasury</span>
+                <h1 className="mt-5 text-3xl tracking-[-0.01em]">{rec.profile.legalName || rec.handle}</h1>
+                <p className="mt-2 font-mono text-[13px] text-muted">@{rec.handle}</p>
+              </div>
+              <button
+                onClick={() => setOtcOpen(true)}
+                className="shrink-0 rounded-[7px] border-[0.5px] border-line-strong bg-ink px-4 py-2.5 text-[13px] text-bg transition-opacity hover:opacity-90"
+              >
+                New OTC contract →
+              </button>
+            </div>
 
             <div className="mt-8 grid gap-4 sm:grid-cols-2">
               <Stat label="Institution" value={short(rec.institutionId)} href={explorer.object(rec.institutionId)} />
@@ -69,6 +81,8 @@ export default function Dashboard() {
           </section>
         )}
       </main>
+
+      <CreateOtcModal open={otcOpen} onClose={() => setOtcOpen(false)} />
     </div>
   );
 }

@@ -2,35 +2,37 @@
 
 import { useCallback } from "react";
 import {
+  useCurrentAccount,
   useCurrentClient,
   useCurrentNetwork,
-  useCurrentWallet,
   useDAppKit,
 } from "@mysten/dapp-kit-react";
 import { Transaction } from "@mysten/sui/transactions";
 import { toBase64 } from "@mysten/sui/utils";
-import { getSession } from "@mysten/enoki";
 
 /** Returns an executor that runs a Move PTB as a GASLESS sponsored transaction.
  *  The browser builds the tx-kind bytes and signs, but gas sponsorship runs on
  *  the server (the PRIVATE Enoki key never reaches the client): build kind bytes
- *  → POST /api/sponsor (server fills gas) → zkLogin wallet signs the bytes →
- *  POST /api/execute (server executes). Resolves to the tx digest. */
+ *  → POST /api/sponsor (server fills gas, sets sender) → the zkLogin wallet signs
+ *  the sponsor's bytes → POST /api/execute (server executes). The sender is the
+ *  connected zkLogin address, passed explicitly (Enoki's `sender` branch).
+ *  Resolves to the tx digest. */
 export function useSponsoredExecute() {
   const dAppKit = useDAppKit();
   const client = useCurrentClient();
   const network = useCurrentNetwork();
-  const wallet = useCurrentWallet();
+  const account = useCurrentAccount();
 
   return useCallback(
     async (build: (tx: Transaction) => void): Promise<string> => {
-      if (!wallet) throw new Error("Sign in first.");
-      const session = await getSession(wallet);
-      if (!session?.jwt) throw new Error("No active Enoki session.");
+      if (!account) throw new Error("Sign in first.");
 
       const tx = new Transaction();
       build(tx);
-      // onlyTransactionKind → no gas data; the sponsor (server) fills it in.
+      // Set the sender so sender-dependent intents (e.g. coinWithBalance picking
+      // the user's coins) resolve at build time. onlyTransactionKind still emits
+      // only the kind; Enoki wraps in the sender + sponsor gas.
+      tx.setSenderIfNotSet(account.address);
       const kindBytes = await tx.build({ client, onlyTransactionKind: true });
 
       const sponsored = await postJson<{ bytes: string; digest: string }>(
@@ -38,7 +40,7 @@ export function useSponsoredExecute() {
         {
           network,
           transactionKindBytes: toBase64(kindBytes),
-          jwt: session.jwt,
+          sender: account.address,
         },
       );
 
@@ -52,7 +54,7 @@ export function useSponsoredExecute() {
       });
       return executed.digest;
     },
-    [dAppKit, client, network, wallet],
+    [dAppKit, client, network, account],
   );
 }
 
