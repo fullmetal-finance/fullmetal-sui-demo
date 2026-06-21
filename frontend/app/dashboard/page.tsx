@@ -19,7 +19,7 @@ import { loadInstitution, saveInstitution, saveQuotes, type InstitutionRecord } 
 import { readInstitution, readUserContracts, type InstState } from "@/lib/institution-state";
 import { useSponsoredExecute } from "@/lib/sponsored";
 import type { OtcResult } from "@/lib/otc";
-import { MOCK_INCOMING_RFQS, type MockPosition } from "@/lib/mock";
+import { MOCK_INCOMING_RFQS, MOCK_POSITIONS, positionPnl, type MockPosition } from "@/lib/mock";
 
 type Tab = "positions" | "engine" | "rfq";
 
@@ -138,6 +138,13 @@ export default function Dashboard() {
     }
   }
 
+  // net variation margin that would settle in the next 24h cycle across the
+  // desk's book (real on-chain contracts + demo positions). + = received, − = paid.
+  const projectedSettlement = [...positions, ...MOCK_POSITIONS].reduce(
+    (sum, p) => sum + positionPnl(p),
+    0,
+  );
+
   return (
     <div className="min-h-screen">
       <header className="w-full border-b border-line-strong bg-surface">
@@ -172,11 +179,17 @@ export default function Dashboard() {
             </div>
 
             {/* treasury strip */}
-            <div className="mt-8 grid grid-cols-2 gap-4 lg:grid-cols-4">
+            <div className="mt-8 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
               <BigStat label="Total capital" value={state ? usd(state.equity) : "—"} sub="treasury + deployed" accent />
               <BigStat label="Available" value={state ? usd(state.available) : "—"} sub="free to deploy" />
               <BigStat label="Reserved IM" value={state ? usd(state.reserved) : "—"} />
               <BigStat label="Rehypothecated" value={state ? usd(state.rehypothecated) : "—"} sub="in DeepBook" />
+              <BigStat
+                label="Projected 24h settlement"
+                value={`${projectedSettlement >= 0 ? "+" : "−"}${usd(Math.abs(projectedSettlement), { maximumFractionDigits: 0 })}`}
+                sub={projectedSettlement >= 0 ? "net VM to receive" : "net VM to pay"}
+                tone={projectedSettlement >= 0 ? "up" : "down"}
+              />
             </div>
 
             {/* live USDC supply yield across venues */}
@@ -256,11 +269,12 @@ function PanelTab({ active, onClick, children }: { active: boolean; onClick: () 
   );
 }
 
-function BigStat({ label, value, sub, accent }: { label: string; value: string; sub?: string; accent?: boolean }) {
+function BigStat({ label, value, sub, accent, tone }: { label: string; value: string; sub?: string; accent?: boolean; tone?: "up" | "down" }) {
+  const valueColor = tone === "up" ? "text-[#1a6042]" : tone === "down" ? "text-[#9a2c1a]" : "text-ink";
   return (
     <div className={`rounded-[14px] border bg-surface px-6 py-5 ${accent ? "border-line-strong" : "border-line"}`}>
       <p className="text-[11px] font-semibold uppercase tracking-[0.13em] text-muted">{label}</p>
-      <p className="mt-2.5 font-mono text-[26px] font-semibold tracking-[-0.01em] text-ink">{value}</p>
+      <p className={`mt-2.5 font-mono text-[26px] font-semibold tracking-[-0.01em] ${valueColor}`}>{value}</p>
       {sub && <p className="mt-0.5 text-[12px] text-muted">{sub}</p>}
     </div>
   );

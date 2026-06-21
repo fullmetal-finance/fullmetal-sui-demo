@@ -6,7 +6,7 @@
 > fires. USDC-settled (DBUSDC on testnet, 6 decimals).
 >
 > **This is a living document.** Update it whenever the contract architecture
-> changes. Last updated: 2026-06-16. See the [Change log](#change-log) at the end.
+> changes. Last updated: 2026-06-16.
 
 ---
 
@@ -88,6 +88,13 @@ graph TD
     INST -. holds SupplierCap, supplies to .-> MP["DeepBook MarginPool&lt;C&gt; (external shared)"]
     OR -. price + trigger read by .-> FWD
     OR -. trigger read by .-> INST
+
+    classDef shared fill:#dbeafe,stroke:#3b6db5,color:#13294b;
+    classDef cap fill:#fde9c8,stroke:#c4912f,color:#3d2a07;
+    classDef external fill:#e7e0f7,stroke:#6f5fa6,color:#241b40;
+    class PA,HR,OR,INST,FWD shared
+    class PC,OAC,KC,AC,TC cap
+    class MP external
 ```
 
 Key choices (evidence in [§10](#10-design-decisions)):
@@ -209,14 +216,29 @@ stretch upgrade; Pyth is already available transitively via `deepbook_margin`.)
 ```mermaid
 flowchart LR
     A[Admin wallet] -->|deposit_treasury| T[(Institution treasury\nBalance&lt;C&gt;)]
-    T -->|rehypothecate \(admin\)| MP[(DeepBook MarginPool\nearns interest)]
-    MP -->|recall \(admin\) / recall_on_trigger \(anyone\)| T
+    T -->|rehypothecate by admin| MP[(DeepBook MarginPool\nearns interest)]
+    MP -->|recall by admin / recall_on_trigger by anyone| T
     T -. reserve_margin .-> R{{reserved += IM}}
     OF[OtcForward.settle] -->|VM loser→winner| T2[(Counterparty treasury)]
     T -->|VM loser→winner| T2
     OR[RiskOracle trigger] -->|fires| MP
-    style MP fill:#eef
-    style T fill:#efe
+
+    classDef treasury fill:#d8f0e0,stroke:#2f8559,color:#0f3d28;
+    classDef external fill:#e7e0f7,stroke:#6f5fa6,color:#241b40;
+    classDef actor fill:#eceae4,stroke:#9a978d,color:#2a2820;
+    classDef acct fill:#f1eee7,stroke:#b3afa4,color:#2a2820;
+    classDef shared fill:#dbeafe,stroke:#3b6db5,color:#13294b;
+    classDef risk fill:#fbe0db,stroke:#b4341f,color:#5a160c;
+    class T treasury
+    class MP,T2 external
+    class A actor
+    class R acct
+    class OF shared
+    class OR risk
+    linkStyle 1 stroke:#2f8559,stroke-width:2px
+    linkStyle 2 stroke:#b4341f,stroke-width:2px
+    linkStyle 4,5 stroke:#3b6db5,stroke-width:1.5px
+    linkStyle 6 stroke:#b4341f,stroke-width:2px,stroke-dasharray:4 3
 ```
 
 1. **Deposit** — admin funds the treasury.
@@ -257,6 +279,17 @@ flowchart TD
     S{settle each interval} -->|loser covers| V[move net VM+funding loser→winner] --> S
     S -->|loser cannot cover| L[liquidate: release both IMs, pay winner capped, status=LIQUIDATED]
     O --> C[close at expiry: final MTM, release IMs, status=SETTLED]
+
+    classDef open fill:#dbeafe,stroke:#3b6db5,color:#13294b;
+    classDef decision fill:#fde9c8,stroke:#c4912f,color:#3d2a07;
+    classDef good fill:#d8f0e0,stroke:#2f8559,color:#0f3d28;
+    classDef bad fill:#fbe0db,stroke:#b4341f,color:#5a160c;
+    class O open
+    class S decision
+    class V,C good
+    class L bad
+    linkStyle 1 stroke:#2f8559,stroke-width:2px
+    linkStyle 3 stroke:#b4341f,stroke-width:2px
 ```
 
 ---
@@ -403,7 +436,8 @@ does not), so the version is pinned. OZ math stays a git dep (it ships
 
 | Object | ID |
 |---|---|
-| Package (current) | `0xbbf751ec720828c7ca39efefcd246c43c86e46ae310218a420c00aaf27b5b7fa` (upgrade w/ direct offer) |
+| Package (current) | `0x53ed96a991241db1e20c964930f1e9981c2db438f74dc17867f9705bd8b392b0` (upgrade w/ rehypo recall-rounding fix) |
+| Package (prev — direct offer) | `0xbbf751ec720828c7ca39efefcd246c43c86e46ae310218a420c00aaf27b5b7fa` |
 | Package (prev — RFQ) | `0x7106aeb00de8f07c4f5c28e1fc7b13b03e42e474e6221db81e81b09ca80b561e` |
 | Package (original-id) | `0x3dfbfa5254f00a0b501ebfdf449f044340e09f0629b37dfa7d834130157dfddf` |
 | UpgradeCap (owner) | `0xbe6518c77007f7fb3940faed2b4b3bf5ec8a6a7fcc653f66eeee548614149fe2` |
@@ -442,14 +476,3 @@ does not), so the version is pinned. OZ math stays a git dep (it ships
 - **Pyth oracle** — replace/augment the keeper oracle with Pyth pull updates.
 - **ISDA-style grace/notice** before close-out; **maker/checker** on treasury moves.
 - **Partial-recall handling** under DeepBook withdrawal rate limits (mainnet).
-
----
-
-## Change log
-
-| Date | Change |
-|---|---|
-| 2026-06-16 | Initial architecture: onboarding (institution/protocol/registry/settlement), oracle, rehypo (DeepBook), otc_forward. 8 tests pass. |
-| 2026-06-16 | **Deployed to testnet** via MVR (`@deepbook/margin-trading/13`). Rehypothecate→trigger→recall loop proven on-chain with 50 real DBUSDC. |
-| 2026-06-16 | **RFQ module added** (on-chain firm quotes; firm-reserve-at-quote + re-key-at-accept solves single-signer async open). 10/10 tests. Package **upgraded** on testnet (via SDK — CLI is older than testnet protocol v126); OtcWitness + RfqWitness allowlisted. Two-institution RFQ proven live (`two-inst-rfq.ts`). |
-| 2026-06-16 | **Direct-offer module added** (`direct.move`) — the "type the counterparty's org ID" path; mirror of RFQ (proposer commits first), reuses `open_from_rfq`/`RfqWitness` so no new settlement code or allowlist entry. 12/12 tests. Package **upgraded** (`0xbbf751ec…`); two-institution direct offer proven live (`two-inst-direct.ts`). |

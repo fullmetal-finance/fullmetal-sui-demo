@@ -1,36 +1,94 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Fullmetal demo — frontend
 
-## Getting Started
+The institutional desk web app: onboarding, treasury, OTC contract creation, an RFQ
+inbox, and the collateral manager (the rehypothecation + oracle-recall loop). It drives
+the [Fullmetal](../README.md) protocol end-to-end on Sui testnet.
 
-First, run the development server:
+## Stack
+
+- **Next.js 16** (App Router) + **React 19**, **Tailwind CSS v4**, Geist fonts.
+- **@mysten/dapp-kit 2.0** + **@mysten/enoki** — zkLogin wallets ("Sign in with Google",
+  no seed phrase) and sponsored (gasless) transactions.
+- **@mysten/sui 2.x** for reads and transaction building; **@mysten/deepbook-v3** types.
+
+## What's real vs mocked
+
+- **Real on-chain (testnet):** creating an institution, depositing, opening OTC forwards
+  (direct + RFQ-accept), rehypothecate / recall, the oracle trigger and recall.
+- **Live mainnet reads:** USDC supply APRs for DeepBook margin, Suilend, and Navi —
+  computed from each pool's on-chain interest model (`/api/rates`, no API keys).
+- **Mocked for the demo:** the off-chain institution profile (localStorage), the maker
+  quote-service responses, the trader roster, incoming RFQs, and the on-ramp card.
+
+## Setup
+
+Requires Node 20+ and a `frontend/.env.local`:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+# Enoki — zkLogin + sponsored transactions  (https://portal.enoki.mystenlabs.com)
+NEXT_PUBLIC_ENOKI_API_KEY=enoki_public_...
+ENOKI_PRIVATE_API_KEY=enoki_private_...          # server-only; sponsors transactions
+
+# Google OAuth client — the zkLogin provider  (https://console.cloud.google.com)
+NEXT_PUBLIC_GOOGLE_CLIENT_ID=...apps.googleusercontent.com
+
+# Optional: server keypair for the faucet/oracle routes.
+# Falls back to the active key in ~/.sui if unset.
+FAUCET_SECRET_KEY=suiprivkey...
+SUI_ADDRESS=0x...
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Then:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm install
+npm run dev      # http://localhost:3000
+npm run build    # production build
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### OAuth redirect
 
-## Learn More
+zkLogin redirects to `<origin>/auth/callback`. Register that exact URI (**scheme
+included** — `https` in production) in the Google OAuth client's *Authorized redirect
+URIs*, and the origin in *Authorized JavaScript origins* plus the Enoki app's allowed
+origins. Vercel preview URLs change per deploy, so test sign-in on a stable domain.
 
-To learn more about Next.js, take a look at the following resources:
+## Structure
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```
+app/
+  page.tsx              landing
+  onboarding/           create an institution desk (zkLogin)
+  dashboard/            treasury, positions, RFQ inbox, collateral manager
+  auth/callback/        zkLogin redirect target
+  components/           RehypoHero (collateral manager), Blotter, QuotesInbox,
+                        MarketRfqs, CreateOtcModal, RatesBar, ManageModal, ...
+  api/
+    sponsor, execute    Enoki sponsored-transaction backend
+    faucet              mock fiat on-ramp (mints + returns DBUSDC)
+    oracle              keeper push / spike / recall sequence
+    makers              mock competing RFQ quotes
+    rates               live USDC supply APRs (DeepBook / Suilend / Navi)
+lib/
+  fullmetal.ts          on-chain config — package, singletons, Move-call targets
+  sponsored.ts          gasless execute hook (build kind → sponsor → sign → execute)
+  institution-state.ts  on-chain reads (treasury, positions, oracle)
+  otc.ts / quotes.ts    create OTC + accept RFQ quote
+  rehypo-actions.ts     rehypothecate / recall hooks
+  oracle.ts / rates.ts  oracle controls + live-rate hook
+  store.ts              localStorage profile / quote persistence
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Demo flow
 
-## Deploy on Vercel
+1. **Onboarding** — sign in with Google; create an institution desk (admin name, legal
+   entity, handle). One sponsored transaction shares the `Institution` object.
+2. **Load funds** — the mock on-ramp faucets DBUSDC and deposits it to the treasury.
+3. **New OTC contract** — direct (type a counterparty handle) or RFQ (broadcast; three
+   desks quote, accept the best). Posted IM auto-rehypothecates to DeepBook.
+4. **Collateral manager** — push an SPCX mark. A move past the ±15% oracle threshold
+   latches the trigger and recalls collateral from DeepBook; three in-band prints later,
+   volatility is deemed subsided and the margin auto-redeposits.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+The protocol architecture (object model, accounting, capability auth, lifecycle flows)
+is in [ARCHITECTURE.md](https://github.com/fullmetal-finance/fullmetal-sui-demo/blob/main/ARCHITECTURE.md).
