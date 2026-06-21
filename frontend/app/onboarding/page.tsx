@@ -9,9 +9,10 @@ import SignInWithGoogle from "../components/SignInWithGoogle";
 import { DBUSDC_TYPE, SHARED, TARGET } from "@/lib/fullmetal";
 import { useSponsoredExecute } from "@/lib/sponsored";
 import { createdId, suiRead } from "@/lib/sui";
-import { saveInstitution } from "@/lib/store";
+import { loadInstitution, saveInstitution } from "@/lib/store";
 
 type Profile = {
+  adminName: string;
   legalName: string;
   email: string;
   phone: string;
@@ -21,6 +22,7 @@ type Profile = {
 };
 
 const EMPTY: Profile = {
+  adminName: "",
   legalName: "",
   email: "",
   phone: "",
@@ -44,11 +46,20 @@ export default function Onboarding() {
   // server and first client paint match (no hydration mismatch).
   const signedIn = mounted && account;
 
+  // If this account already registered an institution, onboarding is a dead end —
+  // send it straight to the dashboard instead of showing the form again. Covers
+  // every route in here: the landing button, dashboard empty-state links, the
+  // back button, or a bookmarked /onboarding URL.
+  const existing = mounted && account ? loadInstitution(account.address) : null;
+  useEffect(() => {
+    if (existing) router.replace("/dashboard");
+  }, [existing, router]);
+
   const set = (k: keyof Profile) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setP((prev) => ({ ...prev, [k]: e.target.value }));
 
   const profileComplete = Boolean(
-    p.legalName.trim() && p.email.trim() && p.handle.trim(),
+    p.adminName.trim() && p.legalName.trim() && p.email.trim() && p.handle.trim(),
   );
 
   async function createInstitution() {
@@ -74,6 +85,7 @@ export default function Onboarding() {
         institutionId: createdId(full, "::institution::Institution<"),
         adminCapId: createdId(full, "::institution::AdminCap"),
         profile: {
+          adminName: p.adminName,
           legalName: p.legalName,
           email: p.email,
           phone: p.phone,
@@ -90,6 +102,17 @@ export default function Onboarding() {
     } finally {
       setCreating(false);
     }
+  }
+
+  // Returning desk: render nothing but a brief notice while the redirect fires.
+  if (existing) {
+    return (
+      <div className="flex min-h-dvh items-center justify-center px-6">
+        <p className="font-mono text-[12px] uppercase tracking-[0.18em] text-muted">
+          Taking you to your desk…
+        </p>
+      </div>
+    );
   }
 
   return (
@@ -114,9 +137,14 @@ export default function Onboarding() {
             </div>
 
             <div className="mt-7 grid gap-5">
-              <Field label="Legal entity name">
-                <input className={inputCls} value={p.legalName} onChange={set("legalName")} placeholder="Goldwoman Socks LLC" />
-              </Field>
+              <div className="grid gap-5 sm:grid-cols-2">
+                <Field label="Your name" hint="shown on contracts you open">
+                  <input className={inputCls} value={p.adminName} onChange={set("adminName")} placeholder="Jamie Dimon" />
+                </Field>
+                <Field label="Legal entity name">
+                  <input className={inputCls} value={p.legalName} onChange={set("legalName")} placeholder="Goldwoman Socks LLC" />
+                </Field>
+              </div>
 
               <div className="grid gap-5 sm:grid-cols-2">
                 <Field label="Work email">
@@ -195,7 +223,7 @@ export default function Onboarding() {
                   </button>
                   {!profileComplete && (
                     <p className="text-center text-[12px] text-muted">
-                      Add legal name, email, and an institution ID to continue.
+                      Add your name, legal name, email, and an institution ID to continue.
                     </p>
                   )}
                   {error && (

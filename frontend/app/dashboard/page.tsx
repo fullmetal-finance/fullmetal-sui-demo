@@ -69,7 +69,7 @@ export default function Dashboard() {
   // record the desk's real on-chain contracts in the blotter
   useEffect(() => {
     if (!rec?.otcIds?.length) return;
-    readUserContracts(rec.otcIds, rec.institutionId).then(setPositions).catch(() => {});
+    readUserContracts(rec.otcIds, rec.institutionId, rec.profile.adminName).then(setPositions).catch(() => {});
   }, [rec]);
 
   const reload = useCallback(() => {
@@ -156,45 +156,48 @@ export default function Dashboard() {
 
             {/* treasury strip */}
             <div className="mt-8 grid grid-cols-2 gap-4 lg:grid-cols-4">
-              <BigStat label="Equity" value={state ? usd(state.equity) : "—"} accent />
-              <BigStat label="Available" value={state ? usd(state.available) : "—"} />
+              <BigStat label="Total capital" value={state ? usd(state.equity) : "—"} sub="treasury + deployed" accent />
+              <BigStat label="Available" value={state ? usd(state.available) : "—"} sub="free to deploy" />
               <BigStat label="Reserved IM" value={state ? usd(state.reserved) : "—"} />
               <BigStat label="Rehypothecated" value={state ? usd(state.rehypothecated) : "—"} sub="in DeepBook" />
             </div>
 
-            {/* tabs — full-width, three separated buttons */}
-            <div className="mt-8 grid w-full grid-cols-1 gap-3 sm:grid-cols-3">
-              <TabBtn active={tab === "positions"} onClick={() => setTab("positions")}>Positions &amp; traders</TabBtn>
-              <TabBtn active={tab === "engine"} onClick={() => setTab("engine")}>Collateral engine</TabBtn>
-              <TabBtn active={tab === "rfq"} onClick={() => setTab("rfq")}>
-                RFQ inbox{makersBusy && <span className="ml-1.5 inline-block h-[5px] w-[5px] animate-pulse rounded-full bg-[#1f6f4d]" />}
-              </TabBtn>
-            </div>
+            {/* unified tabbed panel — the strip is the header of the content
+                container, so the active tab opens into the body below it */}
+            <div className="mt-8 overflow-hidden rounded-[16px] border border-line-strong">
+              <div className="flex divide-x divide-line-strong border-b border-line-strong">
+                <PanelTab active={tab === "positions"} onClick={() => setTab("positions")}>Positions &amp; traders</PanelTab>
+                <PanelTab active={tab === "engine"} onClick={() => setTab("engine")}>Collateral engine</PanelTab>
+                <PanelTab active={tab === "rfq"} onClick={() => setTab("rfq")}>
+                  RFQ inbox{makersBusy && <span className="ml-1.5 inline-block h-[5px] w-[5px] animate-pulse rounded-full bg-[#1f6f4d] align-middle" />}
+                </PanelTab>
+              </div>
 
-            <div className="mt-6">
-              {tab === "positions" && (
-                <div className="space-y-6">
-                  <Blotter real={positions} />
-                  <TradersPanel />
-                </div>
-              )}
-              {tab === "engine" && (
-                <RehypoHero instId={rec.institutionId} state={state} onRefresh={() => sync(rec.institutionId)} />
-              )}
-              {tab === "rfq" && (
-                <QuotesInbox
-                  rfqIds={rec.rfqIds ?? []}
-                  loading={makersBusy}
-                  onAccepted={(otcId) => {
-                    if (account) {
-                      const next = { ...rec, otcIds: [...(rec.otcIds ?? []), otcId] };
-                      saveInstitution(account.address, next);
-                      setRec(next);
-                    }
-                    reload();
-                  }}
-                />
-              )}
+              <div className="bg-bg p-4 sm:p-5">
+                {tab === "positions" && (
+                  <div className="space-y-6">
+                    <Blotter real={positions} />
+                    <TradersPanel />
+                  </div>
+                )}
+                {tab === "engine" && (
+                  <RehypoHero instId={rec.institutionId} state={state} onRefresh={() => sync(rec.institutionId)} />
+                )}
+                {tab === "rfq" && (
+                  <QuotesInbox
+                    rfqIds={rec.rfqIds ?? []}
+                    loading={makersBusy}
+                    onAccepted={(otcId) => {
+                      if (account) {
+                        const next = { ...rec, otcIds: [...(rec.otcIds ?? []), otcId] };
+                        saveInstitution(account.address, next);
+                        setRec(next);
+                      }
+                      reload();
+                    }}
+                  />
+                )}
+              </div>
             </div>
           </>
         )}
@@ -206,11 +209,15 @@ export default function Dashboard() {
   );
 }
 
-function TabBtn({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+function PanelTab({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
     <button
       onClick={onClick}
-      className={`rounded-[11px] border px-4 py-3.5 text-center text-[14px] font-semibold transition-colors ${active ? "border-line-strong bg-ink text-bg" : "border-line-strong bg-surface text-ink-soft hover:bg-bg hover:text-ink"}`}
+      className={`flex-1 px-4 py-3.5 text-center text-[14px] font-semibold transition-colors ${
+        active
+          ? "bg-ink text-bg"
+          : "bg-surface text-ink-soft hover:bg-bg hover:text-ink"
+      }`}
     >
       {children}
     </button>

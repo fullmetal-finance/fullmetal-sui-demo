@@ -2,8 +2,10 @@ import Image from "next/image";
 import Link from "next/link";
 import { SITE } from "@/lib/site";
 
-/* Brand logo (public/logo.png), ported from fullmetal-web.
-   Grayscale art on near-white, so `dark:invert` covers dark mode. */
+/* Brand logo, ported from fullmetal-web. We use logo-transparent.png (the flat
+   background keyed out) so the page/header background shows through in BOTH
+   themes — `dark:invert` then only flips the grayscale wordmark to light for
+   dark mode, with no mismatched rectangle behind it. */
 
 const SIZES = {
   lg: "h-16 w-[248px]",
@@ -22,7 +24,7 @@ export default function Logo({
     <Link href="/" aria-label={SITE.name} className={`inline-block ${className}`}>
       <span className={`relative block ${SIZES[size]}`}>
         <Image
-          src="/logo.png"
+          src="/logo-transparent.png"
           alt={`${SITE.name} logo`}
           fill
           priority

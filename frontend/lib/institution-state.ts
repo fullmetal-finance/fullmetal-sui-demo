@@ -21,6 +21,14 @@ function decodeU64(bytes?: number[]): bigint {
   return v;
 }
 
+/** Render an absolute expiry timestamp (ms) as a tenor — days to maturity.
+ *  0 = perpetual (no expiry). */
+function tenorLabel(expiryMs: number): string {
+  if (!expiryMs) return "Perp";
+  const days = Math.ceil((expiryMs - Date.now()) / 86_400_000);
+  return days <= 0 ? "<1d" : `${days}d`;
+}
+
 export type InstState = {
   liquid: number; // treasury balance physically present
   reserved: number; // IM reserved across open contracts
@@ -66,10 +74,12 @@ export async function readSuppliedValue(instId: string): Promise<number> {
 export async function readUserContracts(
   otcIds: string[],
   myInstId: string,
+  myTraderName?: string,
 ): Promise<import("./mock").MockPosition[]> {
   if (!otcIds.length) return [];
   const objs = await suiRead.multiGetObjects({ ids: otcIds, options: { showContent: true } });
   const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
+  const name = myTraderName?.trim();
   const rows: import("./mock").MockPosition[] = [];
   for (const o of objs) {
     const f = (o.data?.content as { fields?: Record<string, string> } | undefined)?.fields;
@@ -78,13 +88,14 @@ export async function readUserContracts(
     rows.push({
       asset: f.underlying ?? "—",
       side: isLong ? "long" : "short",
-      trader: short(isLong ? f.trader_long : f.trader_short),
+      // the contract is ours, so the trader on our leg is the signed-in admin
+      trader: name || short(isLong ? f.trader_long : f.trader_short),
       cpty: short(isLong ? f.inst_short : f.inst_long),
       notional: fromUnits(f.notional_6dp ?? "0"),
       entry: fromUnits(f.entry_price ?? "0"),
       mark: fromUnits(f.last_mark ?? f.entry_price ?? "0"),
       im: fromUnits(f.im_each ?? "0"),
-      maturity: f.expiry_ms === "0" ? "perp" : "open",
+      maturity: tenorLabel(Number(f.expiry_ms ?? "0")),
       venue: "DeepBook",
       otcId: o.data!.objectId,
     });

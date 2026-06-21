@@ -33,8 +33,8 @@ export type MockPosition = {
 
 export const MOCK_POSITIONS: MockPosition[] = [
   { asset: "SPCX", side: "long", trader: "A. Whitfield", cpty: "Cumberland", notional: 925_000, entry: 178.2, mark: 185.0, im: 92_500, maturity: "30d", venue: "DeepBook" },
-  { asset: "SPCX", side: "short", trader: "M. Okonkwo", cpty: "Galaxy", notional: 555_000, entry: 188.4, mark: 185.0, im: 55_500, maturity: "14d", venue: "DeepBook" },
-  { asset: "BTC", side: "long", trader: "A. Whitfield", cpty: "Wintermute", notional: 1_200_000, entry: 64_200, mark: 66_800, im: 120_000, maturity: "7d", venue: "DeepBook" },
+  { asset: "SPCX", side: "short", trader: "M. Okonkwo", cpty: "Galaxy", notional: 555_000, entry: 188.4, mark: 185.0, im: 55_500, maturity: "Perp", venue: "Suilend" },
+  { asset: "BTC", side: "long", trader: "A. Whitfield", cpty: "Wintermute", notional: 1_200_000, entry: 64_200, mark: 66_800, im: 120_000, maturity: "7d", venue: "Navi" },
 ];
 
 export type MockCounterparty = { name: string; status: "approved" };

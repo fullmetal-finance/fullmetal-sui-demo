@@ -20,7 +20,7 @@ const GOOGLE_WALLET_NAME = "Sign in with Google";
     disabled, signed-out button (no hydration mismatch), then it goes live. */
 export default function SignInWithGoogle({
   variant = "nav",
-  label = "Sign in with Google",
+  label,
 }: {
   variant?: "nav" | "cta";
   label?: string;
@@ -30,6 +30,10 @@ export default function SignInWithGoogle({
   const account = useCurrentAccount();
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
+
+  // The compact header pill just says "Sign in"; the prominent onboarding CTA
+  // spells out the Google identity. Either can be overridden via `label`.
+  const text = label ?? (variant === "cta" ? "Sign in with Google" : "Sign in");
 
   const googleWallet = mounted
     ? wallets.find((w) => w.name === GOOGLE_WALLET_NAME)
@@ -77,7 +81,7 @@ export default function SignInWithGoogle({
         className="flex w-full items-center justify-center gap-3 rounded-[7px] border-[0.5px] border-line-strong bg-ink px-4 py-3 text-[14px] text-bg transition-opacity hover:opacity-90 disabled:opacity-40"
       >
         <GoogleMark />
-        {label}
+        {text}
       </button>
     );
   }
@@ -86,9 +90,9 @@ export default function SignInWithGoogle({
     <button
       disabled={disabled}
       onClick={onClick}
-      className="rounded-[7px] border-[0.5px] border-line px-4 py-2 text-[12px] tracking-[0.08em] text-ink transition-opacity disabled:opacity-40"
+      className="rounded-[7px] border-[0.5px] border-line-strong px-4 py-2 text-[13px] font-medium tracking-[0.02em] text-ink transition-colors hover:bg-bg disabled:opacity-40"
     >
-      {label}
+      {text}
     </button>
   );
 }

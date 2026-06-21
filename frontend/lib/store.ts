@@ -5,6 +5,7 @@
    (Postgres/KV) keyed by institution id. */
 
 export type InstitutionProfile = {
+  adminName: string; // the desk admin — shown as the trader on contracts they open
   legalName: string;
   email: string;
   phone: string;

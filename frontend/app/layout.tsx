@@ -17,7 +17,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   metadataBase: new URL(SITE.url),
   title: {
-    default: `${SITE.shortName} Demo — Smart collateral on Sui`,
+    default: `${SITE.shortName} Demo — on Sui`,
     template: `%s — ${SITE.shortName} Demo`,
   },
   description: SITE.description,
@@ -26,7 +26,7 @@ export const metadata: Metadata = {
     type: "website",
     url: SITE.url,
     siteName: `${SITE.shortName} Demo`,
-    title: `${SITE.shortName} Demo — Smart collateral on Sui`,
+    title: `${SITE.shortName} Demo - on Sui`,
     description: SITE.description,
     images: [{ url: SITE.ogImage, width: SITE.ogImageWidth, height: SITE.ogImageHeight }],
   },
