@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useCurrentAccount } from "@mysten/dapp-kit-react";
 
 import Logo from "../components/Logo";
@@ -12,12 +12,14 @@ import RehypoHero from "../components/RehypoHero";
 import Blotter from "../components/Blotter";
 import TradersPanel from "../components/TradersPanel";
 import QuotesInbox from "../components/QuotesInbox";
+import MarketRfqs from "../components/MarketRfqs";
+import RatesBar from "../components/RatesBar";
 import { DBUSDC_TYPE, TARGET, explorer, usd } from "@/lib/fullmetal";
 import { loadInstitution, saveInstitution, saveQuotes, type InstitutionRecord } from "@/lib/store";
 import { readInstitution, readUserContracts, type InstState } from "@/lib/institution-state";
 import { useSponsoredExecute } from "@/lib/sponsored";
 import type { OtcResult } from "@/lib/otc";
-import type { MockPosition } from "@/lib/mock";
+import { MOCK_INCOMING_RFQS, type MockPosition } from "@/lib/mock";
 
 type Tab = "positions" | "engine" | "rfq";
 
@@ -32,6 +34,15 @@ export default function Dashboard() {
   const [otcOpen, setOtcOpen] = useState(false);
   const [loadOpen, setLoadOpen] = useState(false);
   const [makersBusy, setMakersBusy] = useState(false);
+  // unread RFQ-inbox badge: seeded with the standing incoming RFQs, bumped when
+  // a broadcast RFQ draws quotes; cleared when the desk opens the tab.
+  const [rfqUnread, setRfqUnread] = useState(MOCK_INCOMING_RFQS.length);
+  const tabRef = useRef<Tab>("positions");
+  const selectTab = useCallback((t: Tab) => {
+    setTab(t);
+    tabRef.current = t;
+    if (t === "rfq") setRfqUnread(0);
+  }, []);
 
   useEffect(() => {
     setMounted(true);
@@ -104,8 +115,8 @@ export default function Dashboard() {
     reload();
     if (rec) sync(rec.institutionId);
     if (res.kind === "rfq") {
-      setTab("rfq");
       setMakersBusy(true);
+      let count = 3;
       try {
         const r = await fetch("/api/makers", {
           method: "POST",
@@ -113,12 +124,17 @@ export default function Dashboard() {
           body: JSON.stringify({ rfqId: res.offerId }),
         });
         const d = await r.json().catch(() => ({}));
-        if (r.ok && d.quotes?.length) saveQuotes(res.offerId, d.quotes);
+        if (r.ok && d.quotes?.length) {
+          saveQuotes(res.offerId, d.quotes);
+          count = d.quotes.length;
+        }
       } catch {
         /* makers offline — inbox shows preview */
       } finally {
         setMakersBusy(false);
       }
+      // light up the RFQ tab — unless the desk is already looking at it
+      if (tabRef.current !== "rfq") setRfqUnread((n) => n + count);
     }
   }
 
@@ -140,7 +156,8 @@ export default function Dashboard() {
           <>
             <div className="flex flex-wrap items-end justify-between gap-4">
               <div>
-                <span className="eyebrow">Institutional desk</span>
+                {/* role context — Admin now; trader mode would read "Trader · <name>" */}
+                <span className="eyebrow">Institutional desk · Admin</span>
                 <h1 className="mt-4 text-[34px] font-semibold leading-[1.05] tracking-[-0.02em]">{rec.profile.legalName || rec.handle}</h1>
                 <div className="mt-2 flex items-center gap-3 font-mono text-[12px] text-muted">
                   <span className="flex items-center gap-1.5 text-ink"><span className="h-[6px] w-[6px] rounded-full bg-[#1f6f4d]" /> LIVE</span>
@@ -162,18 +179,30 @@ export default function Dashboard() {
               <BigStat label="Rehypothecated" value={state ? usd(state.rehypothecated) : "—"} sub="in DeepBook" />
             </div>
 
+            {/* live USDC supply yield across venues */}
+            <RatesBar />
+
             {/* unified tabbed panel — the strip is the header of the content
                 container, so the active tab opens into the body below it */}
             <div className="mt-8 overflow-hidden rounded-[16px] border border-line-strong">
               <div className="flex divide-x divide-line-strong border-b border-line-strong">
-                <PanelTab active={tab === "positions"} onClick={() => setTab("positions")}>Positions &amp; traders</PanelTab>
-                <PanelTab active={tab === "engine"} onClick={() => setTab("engine")}>Collateral engine</PanelTab>
-                <PanelTab active={tab === "rfq"} onClick={() => setTab("rfq")}>
-                  RFQ inbox{makersBusy && <span className="ml-1.5 inline-block h-[5px] w-[5px] animate-pulse rounded-full bg-[#1f6f4d] align-middle" />}
+                <PanelTab active={tab === "positions"} onClick={() => selectTab("positions")}>Positions &amp; traders</PanelTab>
+                <PanelTab active={tab === "rfq"} onClick={() => selectTab("rfq")}>
+                  RFQ inbox
+                  {rfqUnread > 0 && (
+                    <span className="ml-2 inline-flex h-[17px] min-w-[17px] items-center justify-center rounded-full bg-[#b4341f] px-1 align-middle text-[10px] font-bold leading-none text-bg">
+                      {rfqUnread}
+                    </span>
+                  )}
+                  {makersBusy && <span className="ml-1.5 inline-block h-[5px] w-[5px] animate-pulse rounded-full bg-[#1f6f4d] align-middle" />}
                 </PanelTab>
+                <PanelTab active={tab === "engine"} onClick={() => selectTab("engine")}>Collateral manager</PanelTab>
               </div>
 
-              <div className="bg-bg p-4 sm:p-5">
+              <div
+                className="p-4 sm:p-5"
+                style={{ background: "color-mix(in srgb, var(--ink) 5%, var(--bg))" }}
+              >
                 {tab === "positions" && (
                   <div className="space-y-6">
                     <Blotter real={positions} />
@@ -184,18 +213,21 @@ export default function Dashboard() {
                   <RehypoHero instId={rec.institutionId} state={state} onRefresh={() => sync(rec.institutionId)} />
                 )}
                 {tab === "rfq" && (
-                  <QuotesInbox
-                    rfqIds={rec.rfqIds ?? []}
-                    loading={makersBusy}
-                    onAccepted={(otcId) => {
-                      if (account) {
-                        const next = { ...rec, otcIds: [...(rec.otcIds ?? []), otcId] };
-                        saveInstitution(account.address, next);
-                        setRec(next);
-                      }
-                      reload();
-                    }}
-                  />
+                  <div className="space-y-6">
+                    <QuotesInbox
+                      rfqIds={rec.rfqIds ?? []}
+                      loading={makersBusy}
+                      onAccepted={(otcId) => {
+                        if (account) {
+                          const next = { ...rec, otcIds: [...(rec.otcIds ?? []), otcId] };
+                          saveInstitution(account.address, next);
+                          setRec(next);
+                        }
+                        reload();
+                      }}
+                    />
+                    <MarketRfqs />
+                  </div>
                 )}
               </div>
             </div>

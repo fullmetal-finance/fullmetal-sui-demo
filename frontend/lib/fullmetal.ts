@@ -52,6 +52,9 @@ export const SPCX = {
   label: "SpaceX",
   initialMark: 185,
   spikeMark: 240, // +29% > 15% trigger threshold → latches the oracle
+  // on-chain feed `jump_threshold_bps` (1500) — a push whose |Δ|/prev exceeds
+  // this latches the trigger and the permissionless recall fires.
+  triggerPct: 15,
 } as const;
 
 /** Fully-qualified Move-call targets, grouped by module. */

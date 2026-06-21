@@ -5,10 +5,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DEEPBOOK, SPCX, explorer, usd } from "@/lib/fullmetal";
 import type { InstState } from "@/lib/institution-state";
 import { readOracle, readSuppliedValue } from "@/lib/institution-state";
-import { resetOracle, triggerAndRecall } from "@/lib/oracle";
+import { calmOracle, resetOracle, setMark as pushMark, triggerAndRecall } from "@/lib/oracle";
 import { useRecall, useRehypothecate } from "@/lib/rehypo-actions";
 
 type Flow = -1 | 0 | 1;
+
+// consecutive in-band prints that confirm "volatility subsided" → auto-redeposit
+const STABLE_TARGET = 3;
 
 export default function RehypoHero({
   instId,
@@ -28,7 +31,9 @@ export default function RehypoHero({
   const [series, setSeries] = useState<number[]>(() => Array(48).fill(SPCX.initialMark));
   const [flow, setFlow] = useState<Flow>(0);
   const [busy, setBusy] = useState<string | null>(null);
-  const [banner, setBanner] = useState(false);
+  const [bannerMsg, setBannerMsg] = useState<{ tone: "red" | "green"; text: string } | null>(null);
+  const [recalledAmt, setRecalledAmt] = useState(0); // emergency-recalled IM awaiting redeposit
+  const [stable, setStable] = useState(0); // in-band prints seen since the recall
   const [lastDigest, setLastDigest] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // "" = track the live max; a number = the operator's chosen amount
@@ -46,6 +51,9 @@ export default function RehypoHero({
   const interest = Math.max(0, supplied - rehyp);
   const rehypValue = rehypAmt === "" ? deployable : rehypAmt;
   const recallValue = recallAmt === "" ? Math.floor(rehyp * 100) / 100 : recallAmt;
+  // % move the pushed mark represents vs the live mark, and whether it latches
+  const pushPct = mark > 0 ? ((spikePrice - mark) / mark) * 100 : 0;
+  const willTrigger = Math.abs(pushPct) >= SPCX.triggerPct;
 
   const poll = useCallback(async () => {
     try {
@@ -85,28 +93,72 @@ export default function RehypoHero({
     }
   }
 
-  async function doTrigger() {
+  // Single smart entry for the mock oracle: a push beyond ±triggerPct latches the
+  // feed and fires the permissionless recall; an in-band push is a "stabilising"
+  // print — once STABLE_TARGET of them land after a recall, volatility is deemed
+  // subsided, the latch clears, and the recalled IM auto-redeposits to DeepBook.
+  async function doPush() {
+    if (!Number.isFinite(spikePrice) || spikePrice <= 0) return;
+    const triggering =
+      mark > 0 && Math.abs(((spikePrice - mark) / mark) * 100) >= SPCX.triggerPct;
     setError(null);
-    setBusy("trigger");
-    setBanner(true);
-    setFlow(-1);
+    setBusy("push");
     try {
-      // beat 2: keeper pushes the operator's chosen SPCX mark; if it latches the
-      // trigger it runs the permissionless recall, server-side in one sequence.
-      const r = await triggerAndRecall(instId, spikePrice);
-      setMark(r.mark);
-      setTriggered(r.triggered);
-      setSeries((s) => [...s.slice(1), r.mark]);
-      if (r.recallDigest) setLastDigest(r.recallDigest);
-      onRefresh();
-      await poll();
-      setTimeout(() => setBanner(false), 3000);
+      if (triggering) {
+        // beat 2: keeper pushes the chosen mark; if it latches the trigger it runs
+        // the permissionless recall, server-side in one sequence.
+        const inPool = Math.floor(rehyp * 100) / 100;
+        setFlow(-1);
+        const r = await triggerAndRecall(instId, spikePrice);
+        setMark(r.mark);
+        setTriggered(r.triggered);
+        setSeries((s) => [...s.slice(1), r.mark]);
+        if (r.recallDigest) setLastDigest(r.recallDigest);
+        if (r.recalled && inPool > 0) {
+          setRecalledAmt(inPool);
+          setStable(0);
+          setBannerMsg({ tone: "red", text: `⚠ VOLATILITY TRIGGER · SPCX ${fmtPct(mark, r.mark)} · AUTO-DELEVERAGE · RECALLED ${usd(inPool)}` });
+        } else if (r.triggered) {
+          setBannerMsg({ tone: "red", text: `⚠ VOLATILITY TRIGGER · SPCX ${fmtPct(mark, r.mark)}` });
+        }
+        onRefresh();
+        await poll();
+        setTimeout(() => setBannerMsg(null), 3500);
+      } else {
+        // in-band print — stabilising
+        const r = await pushMark(spikePrice);
+        setMark(r.mark);
+        setTriggered(r.triggered);
+        setSeries((s) => [...s.slice(1), r.mark]);
+        if (recalledAmt > 0) {
+          const next = stable + 1;
+          if (next >= STABLE_TARGET) {
+            // volatility subsided → clear the latch + redeposit the recalled IM
+            setFlow(1);
+            await calmOracle();
+            const amt = Math.min(recalledAmt, deployable);
+            if (amt > 0) {
+              const d = await rehypothecate(amt);
+              setLastDigest(d);
+            }
+            setTriggered(false);
+            setBannerMsg({ tone: "green", text: `✓ VOLATILITY SUBSIDED · REDEPOSITED ${usd(amt > 0 ? amt : recalledAmt)} TO DEEPBOOK` });
+            setRecalledAmt(0);
+            setStable(0);
+            onRefresh();
+            await poll();
+            setTimeout(() => setBannerMsg(null), 3500);
+          } else {
+            setStable(next);
+          }
+        }
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
-      setBanner(false);
+      setBannerMsg(null);
     } finally {
       setBusy(null);
-      setTimeout(() => setFlow(0), 600);
+      setTimeout(() => setFlow(0), 700);
     }
   }
 
@@ -139,6 +191,9 @@ export default function RehypoHero({
       setMark(r.mark);
       setTriggered(r.triggered);
       setSeries((s) => [...s.slice(1), r.mark]);
+      setRecalledAmt(0);
+      setStable(0);
+      setBannerMsg(null);
       await poll();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -149,9 +204,12 @@ export default function RehypoHero({
 
   return (
     <section className="relative mt-6 overflow-hidden rounded-[16px] border border-line-strong bg-surface">
-      {banner && (
-        <div className="fm-banner-in absolute inset-x-0 top-0 z-10 flex items-center justify-center gap-3 bg-[#b4341f] py-2.5 text-[13px] font-semibold tracking-[0.06em] text-bg">
-          ⚠ VOLATILITY TRIGGER · SPCX {fmtPct(SPCX.initialMark, SPCX.spikeMark)} · AUTO-DELEVERAGE
+      {bannerMsg && (
+        <div
+          className="fm-banner-in absolute inset-x-0 top-0 z-10 flex items-center justify-center gap-3 py-2.5 text-[13px] font-semibold tracking-[0.06em] text-bg"
+          style={{ background: bannerMsg.tone === "green" ? "#1f6f4d" : "#b4341f" }}
+        >
+          {bannerMsg.text}
         </div>
       )}
 
@@ -162,7 +220,7 @@ export default function RehypoHero({
       >
         <div className="flex items-baseline gap-3">
           <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-soft">
-            Collateral engine
+            Collateral manager
           </span>
           <span className="text-[12px] text-muted">rehypothecation · oracle recall</span>
         </div>
@@ -238,14 +296,37 @@ export default function RehypoHero({
             {busy === "recall" ? "…" : "Recall →"}
           </button>
         </div>
-        <div className="flex items-end gap-2 border-t border-line pt-3">
-          <NumField label={`Push SPCX mark · now ${usd(mark)}`} value={spikePrice} onChange={(v) => setSpikePrice(+v || 0)} />
-          <button onClick={doTrigger} disabled={!!busy} className="rounded-[7px] border border-[#b4341f] px-4 py-2.5 text-[13px] font-semibold text-[#b4341f] transition-colors hover:bg-[#b4341f] hover:text-bg disabled:opacity-40">
-            {busy === "trigger" ? "…" : "Push price →"}
-          </button>
-          <button onClick={doCalm} disabled={!!busy || !triggered} className="rounded-[7px] border border-line-strong px-4 py-2.5 text-[13px] font-semibold text-ink transition-colors hover:bg-surface disabled:opacity-40">
-            {busy === "calm" ? "…" : "Reset"}
-          </button>
+        <div className="border-t border-line pt-3">
+          <div className="flex items-end gap-2">
+            <NumField label={`Push SPCX mark · now ${usd(mark)}`} value={spikePrice} onChange={(v) => setSpikePrice(+v || 0)} />
+            <button
+              onClick={doPush}
+              disabled={!!busy}
+              className={`rounded-[7px] border px-4 py-2.5 text-[13px] font-semibold transition-colors disabled:opacity-40 ${willTrigger ? "border-[#b4341f] text-[#b4341f] hover:bg-[#b4341f] hover:text-bg" : "border-line-strong text-ink hover:bg-surface"}`}
+            >
+              {busy === "push" ? "…" : "Push price →"}
+            </button>
+            <button onClick={doCalm} disabled={!!busy} className="rounded-[7px] border border-line-strong px-4 py-2.5 text-[13px] font-semibold text-ink transition-colors hover:bg-surface disabled:opacity-40">
+              {busy === "calm" ? "…" : "Reset"}
+            </button>
+          </div>
+          {/* live readout: the % move this push represents and what it will do */}
+          <p className="mt-2 font-mono text-[11px] leading-[1.5]">
+            <span className={willTrigger ? "font-semibold text-[#b4341f]" : "text-muted"}>
+              Δ {pushPct >= 0 ? "+" : ""}{pushPct.toFixed(1)}% vs {usd(mark)}
+            </span>
+            <span className="text-muted"> · trigger at ±{SPCX.triggerPct}% · </span>
+            {willTrigger ? (
+              <span className="text-[#b4341f]">exceeds threshold → recalls from DeepBook</span>
+            ) : (
+              <span className="text-muted">in band → no recall</span>
+            )}
+          </p>
+          {recalledAmt > 0 && (
+            <p className="mt-1.5 font-mono text-[11px] text-[#b4341f]">
+              ⚠ {usd(recalledAmt)} recalled to treasury · push {STABLE_TARGET - stable} more in-band print{STABLE_TARGET - stable === 1 ? "" : "s"} to auto-redeposit ({stable}/{STABLE_TARGET})
+            </p>
+          )}
         </div>
       </div>
 

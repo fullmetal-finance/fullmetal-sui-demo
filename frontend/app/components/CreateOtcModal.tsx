@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Image from "next/image";
 
 import {
   INTERVAL_MS,
@@ -11,6 +12,7 @@ import {
   usd,
 } from "@/lib/fullmetal";
 import { useCreateOtc, type OtcResult } from "@/lib/otc";
+import { useRates } from "@/lib/rates";
 
 export default function CreateOtcModal({
   open,
@@ -22,6 +24,7 @@ export default function CreateOtcModal({
   onCreated?: (r: OtcResult) => void;
 }) {
   const createOtc = useCreateOtc();
+  const rates = useRates();
 
   const [entry, setEntry] = useState<"direct" | "rfq">("direct");
   const [counterparty, setCounterparty] = useState("");
@@ -230,11 +233,11 @@ export default function CreateOtcModal({
                 <span>Settlement <span className="text-ink">USDC</span> · auto-liquidation</span>
               </div>
 
-              <Labeled label="Rehypothecate idle margin to">
-                <div className="flex flex-col gap-2">
-                  <Check checked={rehypo} onChange={setRehypo} label="DeepBook margin" />
-                  <Check checked={false} disabled label="Suilend" hint="integrated later" />
-                  <Check checked={false} disabled label="Navi" hint="integrated later" />
+              <Labeled label="Rehypothecate idle margin to" hint="live USDC supply APR">
+                <div className="flex flex-col gap-2.5">
+                  <Check checked={rehypo} onChange={setRehypo} label="DeepBook margin" logo="/logos/deepbook.png" apr={rates?.rates.deepbook} />
+                  <Check checked={false} disabled label="Suilend" hint="integrated later" logo="/logos/suilend.png" apr={rates?.rates.suilend} />
+                  <Check checked={false} disabled label="Navi" hint="integrated later" logo="/logos/navi.png" apr={rates?.rates.navi} />
                 </div>
               </Labeled>
             </Section>
@@ -362,29 +365,37 @@ function Check({
   label,
   hint,
   disabled,
+  logo,
+  apr,
 }: {
   checked: boolean;
   onChange?: (v: boolean) => void;
   label: string;
   hint?: string;
   disabled?: boolean;
+  logo?: string;
+  apr?: number;
 }) {
   return (
     <button
       type="button"
       disabled={disabled}
       onClick={() => onChange?.(!checked)}
-      className={`flex items-center gap-2.5 text-left text-[13px] ${disabled ? "opacity-40" : ""}`}
+      className={`flex w-full items-center gap-2.5 text-left text-[13px] ${disabled ? "cursor-not-allowed" : ""}`}
     >
       <span
-        className={`flex h-4 w-4 items-center justify-center rounded-[4px] border-[0.5px] ${
-          checked ? "border-ink bg-ink text-bg" : "border-line-strong"
+        className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] border-[0.5px] ${
+          checked ? "border-ink bg-ink text-bg" : disabled ? "border-line" : "border-line-strong"
         }`}
       >
         {checked && <span className="text-[10px] leading-none">✓</span>}
       </span>
-      <span className="text-ink">{label}</span>
+      {logo && <Image src={logo} alt="" width={18} height={18} className="shrink-0 rounded-[4px]" />}
+      <span className={disabled ? "text-ink-soft" : "text-ink"}>{label}</span>
       {hint && <span className="text-[11px] text-faint">· {hint}</span>}
+      {apr != null && (
+        <span className="ml-auto font-mono text-[12px] font-semibold text-[#1a6042]">{apr.toFixed(2)}% APR</span>
+      )}
     </button>
   );
 }

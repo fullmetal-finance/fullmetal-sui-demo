@@ -70,7 +70,7 @@ export default function QuotesInbox({
   return (
     <section className="rounded-[14px] border border-line-strong bg-surface">
       <div className="flex items-center justify-between border-b border-line-strong px-6 py-4">
-        <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-ink">RFQ inbox — competing quotes</h2>
+        <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-ink">Incoming Quotes — Accept quotes</h2>
         <span className="flex items-center gap-1.5 font-mono text-[12px] text-muted">
           <span className={`h-[6px] w-[6px] rounded-full ${loading ? "animate-pulse bg-[#1f6f4d]" : live ? "bg-[#1f6f4d]" : "bg-line-strong"}`} />
           {loading ? "desks responding…" : live ? "live · best price wins" : "preview · best price wins"}

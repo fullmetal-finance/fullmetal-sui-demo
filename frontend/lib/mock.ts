@@ -37,6 +37,25 @@ export const MOCK_POSITIONS: MockPosition[] = [
   { asset: "BTC", side: "long", trader: "A. Whitfield", cpty: "Wintermute", notional: 1_200_000, entry: 64_200, mark: 66_800, im: 120_000, maturity: "7d", venue: "Navi" },
 ];
 
+/** RFQs broadcast to this desk by OTHER institutions — the maker side of the
+ *  book. Quoting on them is mocked for the demo. */
+export type IncomingRfq = {
+  id: string;
+  from: string; // requesting institution
+  asset: string;
+  side: "buy" | "sell" | "two-way";
+  notional: number; // USD
+  tenor: string;
+  ageMins: number;
+  refPrice: number; // last mark, prefilled into the quote form
+};
+
+export const MOCK_INCOMING_RFQS: IncomingRfq[] = [
+  { id: "rfq-aurora", from: "Aurora Capital", asset: "SPCX", side: "buy", notional: 740_000, tenor: "30d", ageMins: 3, refPrice: 185 },
+  { id: "rfq-meridian", from: "Meridian Markets", asset: "BTC", side: "two-way", notional: 1_500_000, tenor: "Perp", ageMins: 11, refPrice: 66_800 },
+  { id: "rfq-tessera", from: "Tessera Trading", asset: "SPCX", side: "sell", notional: 410_000, tenor: "14d", ageMins: 26, refPrice: 185 },
+];
+
 export type MockCounterparty = { name: string; status: "approved" };
 export const MOCK_COUNTERPARTIES: MockCounterparty[] = [
   { name: "Cumberland", status: "approved" },
