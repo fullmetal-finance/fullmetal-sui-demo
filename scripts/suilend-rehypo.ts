@@ -20,7 +20,10 @@ import { Transaction } from "@mysten/sui/transactions";
 const client = new SuiJsonRpcClient({ network: "mainnet", url: getJsonRpcFullnodeUrl("mainnet") });
 
 // ---- Suilend mainnet objects ----
+// PKG = original/type id (types — MAIN_POOL, CToken, RateLimiterExemption — key here).
+// PKG_AT = current upgraded package id (call functions here, else EIncorrectVersion).
 const PKG = "0xf95b06141ed4a174f239417323bde3f209b972f5930d8521ea38a52aff3a6ddf";
+const PKG_AT = "0xe53906c2c058d1e369763114418f3c144d1b74960d29b2785718a782fec09b61";
 const MARKET = "0x84030d26d85eaa7035084a057f2f11f701b7e2e4eda87551becbc7c97505ece1";
 const MAIN_POOL = `${PKG}::suilend::MAIN_POOL`;
 const USDC = "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC";
@@ -28,8 +31,8 @@ const RESERVE_INDEX = 7n; // native-USDC reserve in the main market
 const CLOCK = "0x6";
 const AMOUNT = BigInt(process.env.AMOUNT ?? "1000000"); // 1 USDC (6dp)
 
-const DEPOSIT = `${PKG}::lending_market::deposit_liquidity_and_mint_ctokens`;
-const REDEEM = `${PKG}::lending_market::redeem_ctokens_and_withdraw_liquidity`;
+const DEPOSIT = `${PKG_AT}::lending_market::deposit_liquidity_and_mint_ctokens`;
+const REDEEM = `${PKG_AT}::lending_market::redeem_ctokens_and_withdraw_liquidity`;
 const EXEMPTION = `${PKG}::lending_market::RateLimiterExemption<${MAIN_POOL}, ${USDC}>`;
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -81,23 +84,27 @@ async function main() {
 
   const SENDER = process.env.SUI_SENDER;
   if (!SENDER) {
-    console.log("\nReachable ✓. To DRY-RUN supply→redeem (no funds moved):");
-    console.log("  SUI_SENDER=<mainnet addr holding ~1 USDC + a little SUI> npx tsx suilend-rehypo.ts");
+    console.log("\nReachable ✓. To DRY-RUN supply (no funds moved):");
+    console.log("  SUI_SENDER=<mainnet addr holding ~1 USDC> npx tsx suilend-rehypo.ts");
     return;
   }
-  const { data: coins } = await client.getCoins({ owner: SENDER, coinType: USDC });
-  if (!coins.length) return console.log(`\n${SENDER} holds no USDC on mainnet.`);
+  // devInspect needs NO gas/SUI — pure simulation against live state. Fetch a
+  // USDC coin via raw RPC (robust across SDK client shapes).
+  const res = await fetch(getJsonRpcFullnodeUrl("mainnet"), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "suix_getCoins", params: [SENDER, USDC] }),
+  }).then((r) => r.json());
+  const coin = res.result?.data?.[0];
+  if (!coin) return console.log(`\n${SENDER} holds no native USDC on mainnet.`);
+  console.log(`\nUsing USDC coin ${coin.coinObjectId.slice(0, 12)}… (balance ${Number(coin.balance) / 1e6} USDC)`);
 
-  const tx = supplyTx(SENDER, coins[0].coinObjectId);
-  const built = await tx.build({ client });
-  const dr = await client.dryRunTransactionBlock({ transactionBlock: built });
-  console.log(`\nDRY-RUN supply ${Number(AMOUNT) / 1e6} USDC → status: ${dr.effects.status.status}`);
-  if (dr.effects.status.status !== "success") console.log("  error:", dr.effects.status.error);
-  else {
-    const minted = dr.objectChanges?.find((c: any) => (c.objectType ?? "").includes("CToken<"));
-    console.log("  minted CToken:", (minted as any)?.objectType?.slice(0, 80) ?? "(see objectChanges)");
-    console.log("  balanceChanges:", dr.balanceChanges.map((b) => `${b.coinType.slice(-10)} ${b.amount}`).join(", "));
-  }
+  const tx = supplyTx(SENDER, coin.coinObjectId);
+  const dr: any = await client.devInspectTransactionBlock({ sender: SENDER, transactionBlock: tx });
+  const status = dr.effects?.status?.status;
+  console.log(`DEV-INSPECT supply ${Number(AMOUNT) / 1e6} USDC → status: ${status}`);
+  if (status !== "success") console.log("  error:", dr.effects?.status?.error);
+  else console.log("  ✓ deposit_liquidity_and_mint_ctokens executes against the live Suilend reserve (CToken minted in simulation)");
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
