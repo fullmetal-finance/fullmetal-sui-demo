@@ -56,7 +56,10 @@ const USDC_POOL = "0xa3582097b4c57630046c0c49a88bfc6b202a3ec0a9db5597c31765f7563
 const ASSET_ID = 10; // u8 — native USDC reserve
 const AMOUNT = BigInt(process.env.AMOUNT ?? "1000000"); // 1 USDC (6dp)
 
-const CREATE_CAP = () => `${PKG}::account::create_account_cap`;
+// NOTE: account::create_account_cap is public(package) (friend) — NOT callable
+// from a PTB; it only "passes" under devInspect, which bypasses visibility. The
+// real public path integrators use is lending::create_account(ctx) -> AccountCap.
+const CREATE_CAP = () => `${PKG}::lending::create_account`;
 const DEPOSIT = () => `${PKG}::incentive_v3::deposit_with_account_cap`;
 const WITHDRAW = () => `${PKG}::incentive_v3::withdraw_with_account_cap_v2`;
 
@@ -149,7 +152,7 @@ async function main() {
   const status = dr.effects?.status?.status;
   console.log(`DEV-INSPECT supply ${Number(AMOUNT) / 1e6} USDC → status: ${status}`);
   if (status !== "success") console.log("  error:", dr.effects?.status?.error);
-  else console.log("  ✓ create_account_cap + deposit_with_account_cap execute against the live Navi USDC pool (simulated)");
+  else console.log("  ✓ lending::create_account + deposit_with_account_cap execute against the live Navi USDC pool (simulated).\n    NOTE: devInspect bypasses visibility; confirm with dryRun (enforces public-only + gas) before trusting a real tx.");
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
