@@ -2,12 +2,16 @@ export const runtime = "nodejs";
 // cache the route's own response ~10min; both feeds update slowly, this is plenty
 export const revalidate = 600;
 
-/* Live USDC supply-side APRs for the three rehypothecation venues.
+/* Live USDC supply-side APRs + venue risk metrics for the three rehypothecation
+ * venues. The risk metrics are the per-venue adapter reads of
+ * RISK-RESPONSIVE-REHYPOTHECATION.md §4:
+ *   utilization  U_v  — borrowed / (borrowed + available)
+ *   availableUsdc A_v — withdrawable liquidity NOW (max one-tx recall)
+ *   kinkPct      U*_v — the rate model's kink; past it, exit liquidity is thinning
  *
  *  • Navi      — official no-auth API (genuinely live).
  *  • DeepBook  — computed live from the mainnet USDC MarginPool's own on-chain
- *                interest-rate model + utilisation, read over a public RPC (no
- *                API key, no SDK). This is DeepBook's real margin lending rate.
+ *                interest-rate model + utilisation, read over a public RPC.
  *  • Suilend   — computed live from its mainnet USDC reserve's piecewise-linear
  *                rate curve + utilisation, read over a public RPC. */
 
@@ -28,37 +32,60 @@ const SUILEND_MARKET =
 // indicative fallbacks (percent) — used only if a live read fails
 const FALLBACK = { deepbook: 4.0, suilend: 5.1, navi: 5.4 } as const;
 
+/** One venue's live read: supply APR + the §4 adapter risk metrics. */
+type VenueRead = {
+  apr: number; // supply APR, percent
+  utilization: number | null; // U_v ∈ [0,1]
+  availableUsdc: number | null; // A_v, whole USDC withdrawable now
+  kinkPct: number | null; // U*_v, percent (rate model kink)
+};
+
 type NaviPool = {
   token?: { coinType?: string };
   supplyIncentiveApyInfo?: { vaultApr?: string };
+  totalSupplyAmount?: string;
+  borrowedAmount?: string;
+  leftSupply?: string;
 };
 
-/** Navi USDC base supply APR (percent), or null if the feed is unreachable. */
-async function naviUsdcSupplyApr(): Promise<number | null> {
+/** Navi USDC read: APR from their API, liquidity/utilisation from the same payload. */
+async function naviUsdc(): Promise<VenueRead | null> {
   try {
     const res = await fetchJson(NAVI_URL, undefined, { accept: "application/json" });
     const json = res as { data?: NaviPool[] } | NaviPool[];
     const pools = Array.isArray(json) ? json : (json.data ?? []);
     const usdc = pools.find((p) => p?.token?.coinType === NAVI_USDC);
-    const v = parseFloat(usdc?.supplyIncentiveApyInfo?.vaultApr ?? "");
-    return Number.isFinite(v) ? v : null;
+    const apr = parseFloat(usdc?.supplyIncentiveApyInfo?.vaultApr ?? "");
+    if (!Number.isFinite(apr)) return null;
+    // API amounts are 1e9-scaled (26552060021359955 ≈ 26.55M USDC — cross-checked
+    // against the on-chain Pool<USDC>.balance)
+    const supplied = Number(usdc?.totalSupplyAmount);
+    const borrowed = Number(usdc?.borrowedAmount);
+    const haveLiq = Number.isFinite(supplied) && Number.isFinite(borrowed) && supplied > 0;
+    return {
+      apr,
+      utilization: haveLiq ? borrowed / supplied : null,
+      availableUsdc: haveLiq ? Math.max(0, supplied - borrowed) / 1e9 : null,
+      kinkPct: null, // Navi's kink lives in its rate-factor tables, not this API
+    };
   } catch {
     return null;
   }
 }
 
-/** DeepBook USDC margin SUPPLY APR (percent), computed from the pool's on-chain
- *  interest-rate model + current utilisation. All model params are 1e9-scaled.
+/** DeepBook USDC margin read, computed from the pool's on-chain interest-rate
+ *  model + current utilisation. All model params are 1e9-scaled.
  *  borrow = util<=opt ? base + slope·(util/opt)
  *                     : base + slope + excess·((util-opt)/(1-opt))
  *  supply = borrow · util · (1 − protocolSpread)                              */
-async function deepbookUsdcSupplyApr(): Promise<number | null> {
+async function deepbookUsdc(): Promise<VenueRead | null> {
   try {
     const res = (await fetchJson(MAINNET_RPC, {
       jsonrpc: "2.0",
       id: 1,
       method: "sui_getObject",
       params: [DEEPBOOK_USDC_POOL, { showContent: true }],
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     })) as { result?: { data?: { content?: { fields?: Record<string, any> } } } };
     const f = res.result?.data?.content?.fields;
     if (!f) return null;
@@ -79,16 +106,22 @@ async function deepbookUsdcSupplyApr(): Promise<number | null> {
       u <= opt
         ? base + (opt ? slope * (u / opt) : 0)
         : base + slope + excess * ((u - opt) / (1 - opt));
-    return borrow * u * (1 - spread) * 100;
+    return {
+      apr: borrow * u * (1 - spread) * 100,
+      utilization: u,
+      availableUsdc: Math.max(0, supplied - borrowed) / 1e6,
+      kinkPct: opt * 100,
+    };
   } catch {
     return null;
   }
 }
 
-/** Suilend USDC SUPPLY APR (percent) from its mainnet reserve. The reserve
- *  carries a piecewise-linear borrow curve (interest_rate_utils% → aprs in bps);
- *  we interpolate at the live utilisation, then supply = borrow·util·(1−spread). */
-async function suilendUsdcSupplyApr(): Promise<number | null> {
+/** Suilend USDC read from its mainnet reserve. The reserve carries a piecewise-
+ *  linear borrow curve (interest_rate_utils% → aprs in bps); we interpolate at
+ *  live utilisation, then supply = borrow·util·(1−spread). The kink is the last
+ *  curve breakpoint before 100% — beyond it the steep segment begins. */
+async function suilendUsdc(): Promise<VenueRead | null> {
   try {
     const res = (await fetchJson(MAINNET_RPC, {
       jsonrpc: "2.0",
@@ -125,8 +158,15 @@ async function suilendUsdcSupplyApr(): Promise<number | null> {
         break;
       }
     }
-    // bps → fraction (÷10000), then supply = borrow·util·(1−spread), ×100 → percent
-    return (bps / 10000) * u * (1 - spread) * 100;
+    // last breakpoint below 100% = where the steep segment starts
+    const kinks = utils.filter((x) => x > 0 && x < 100);
+    return {
+      // bps → fraction (÷10000), then supply = borrow·util·(1−spread), ×100 → percent
+      apr: (bps / 10000) * u * (1 - spread) * 100,
+      utilization: u,
+      availableUsdc: avail / 1e6,
+      kinkPct: kinks.length ? kinks[kinks.length - 1] : null,
+    };
   } catch {
     return null;
   }
@@ -157,17 +197,23 @@ async function fetchJson(
 
 export async function GET() {
   const [navi, deepbook, suilend] = await Promise.all([
-    naviUsdcSupplyApr(),
-    deepbookUsdcSupplyApr(),
-    suilendUsdcSupplyApr(),
+    naviUsdc(),
+    deepbookUsdc(),
+    suilendUsdc(),
   ]);
+  const risk = (v: VenueRead | null) =>
+    v
+      ? { utilization: v.utilization, availableUsdc: v.availableUsdc, kinkPct: v.kinkPct }
+      : { utilization: null, availableUsdc: null, kinkPct: null };
   return Response.json({
     rates: {
-      deepbook: deepbook ?? FALLBACK.deepbook,
-      suilend: suilend ?? FALLBACK.suilend,
-      navi: navi ?? FALLBACK.navi,
+      deepbook: deepbook?.apr ?? FALLBACK.deepbook,
+      suilend: suilend?.apr ?? FALLBACK.suilend,
+      navi: navi?.apr ?? FALLBACK.navi,
     },
     live: { deepbook: deepbook != null, suilend: suilend != null, navi: navi != null },
+    // per-venue adapter reads (RISK-RESPONSIVE-REHYPOTHECATION.md §4)
+    risk: { deepbook: risk(deepbook), suilend: risk(suilend), navi: risk(navi) },
     fetchedAt: Date.now(),
   });
 }

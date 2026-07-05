@@ -125,6 +125,43 @@ export function withdrawTx(sender: string, capId: string, amount = AMOUNT): Tran
   return tx;
 }
 
+// FULL ROUND-TRIP in one PTB: refresh oracle -> create AccountCap -> deposit
+// AMOUNT -> withdraw most of it -> wrap Balance -> everything back to sender.
+// dryRun enforces visibility (this is what caught the friend-only
+// create_account_cap) and gas. The oracle refresh is REQUIRED: withdraw asserts
+// price freshness (Storage.update_interval = 15000ms on-chain) and Navi's
+// keepers push only every few minutes, so a bare withdraw aborts (1502 in
+// calculator::calculate_value). navi-sdk's updateOracleByIdsPTB pulls the Pyth
+// VAA from Hermes and prepends update_single_price for oracleId 10 (nUSDC).
+async function roundTripTx(sender: string, usdcCoinId: string): Promise<Transaction> {
+  const { updateOracleByIdsPTB } = await import("navi-sdk");
+  const tx = new Transaction();
+  tx.setSender(sender);
+  await updateOracleByIdsPTB(client as any, tx as any, [10]);
+  const cap = tx.moveCall({ target: CREATE_CAP() });
+  const [coin] = tx.splitCoins(tx.object(usdcCoinId), [AMOUNT]);
+  tx.moveCall({
+    target: DEPOSIT(),
+    typeArguments: [USDC],
+    arguments: [
+      tx.object(CLOCK), tx.object(STORAGE), tx.object(USDC_POOL), tx.pure.u8(ASSET_ID),
+      coin, tx.object(INCENTIVE_V2), tx.object(INCENTIVE_V3), cap,
+    ],
+  });
+  const bal = tx.moveCall({
+    target: WITHDRAW(),
+    typeArguments: [USDC],
+    arguments: [
+      tx.object(CLOCK), tx.object(PRICE_ORACLE), tx.object(STORAGE), tx.object(USDC_POOL),
+      tx.pure.u8(ASSET_ID), tx.pure.u64(AMOUNT - 10_000n), // withdraw all but 0.01 USDC
+      tx.object(INCENTIVE_V2), tx.object(INCENTIVE_V3), cap, tx.object(SUI_SYSTEM),
+    ],
+  });
+  const usdcBack = tx.moveCall({ target: "0x2::coin::from_balance", typeArguments: [USDC], arguments: [bal] });
+  tx.transferObjects([usdcBack, cap], sender);
+  return tx;
+}
+
 async function main() {
   console.log("— Navi mainnet rehypothecation (read + dry-run) —\n");
   PKG = await latestPkg();
@@ -146,6 +183,19 @@ async function main() {
   const coin = res.result?.data?.[0];
   if (!coin) return console.log(`\n${SENDER} holds no native USDC on mainnet.`);
   console.log(`\nUsing USDC coin ${coin.coinObjectId.slice(0, 12)}… (balance ${Number(coin.balance) / 1e6} USDC)`);
+
+  if (process.env.DRYRUN) {
+    const tx = await roundTripTx(SENDER, coin.coinObjectId);
+    const bytes = await tx.build({ client });
+    const dr: any = await client.dryRunTransactionBlock({ transactionBlock: bytes });
+    const status = dr.effects?.status?.status;
+    console.log(`DRY-RUN create-cap→deposit→withdraw ${Number(AMOUNT) / 1e6} USDC → status: ${status}`);
+    if (status !== "success") return console.log("  error:", dr.effects?.status?.error);
+    const delta = (dr.balanceChanges ?? []).find((b: any) => b.coinType === USDC);
+    console.log(`  USDC balance change: ${delta ? Number(delta.amount) / 1e6 : "0"} (≈ −0.01 left supplied)`);
+    console.log("  ✓ lending::create_account, deposit_with_account_cap AND withdraw_with_account_cap_v2 all execute (public, gas-paid, oracle-fresh path)");
+    return;
+  }
 
   const tx = supplyTx(SENDER, coin.coinObjectId);
   const dr: any = await client.devInspectTransactionBlock({ sender: SENDER, transactionBlock: tx });

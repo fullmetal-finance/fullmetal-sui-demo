@@ -55,6 +55,12 @@ public struct RehypoConfig has store {
     init_margin_bps: u16, // initial-margin ratio applied to new contracts (1e4 = 100%)
     maint_margin_bps: u16, // maintenance-margin floor
     recall_trigger_bps: u16, // volatility move that latches a risk recall
+    // Liquidity floor F = max(stress_floor, phi_bps · reserved / 1e4) — the
+    // RISK-RESPONSIVE-REHYPOTHECATION.md §2 invariant T ≥ F. `stress_floor`
+    // is the keeper-estimated O_stress (absolute units); `phi_bps` is the
+    // unconditional 25%-of-reserved-IM floor (EMIR Art.28(a) / LCR ¶69 analog).
+    stress_floor: u64,
+    phi_bps: u16,
     venues: vector<VenueCfg>,
 }
 
@@ -76,6 +82,8 @@ fun ensure_config<C>(inst: &mut Institution<C>) {
             init_margin_bps: 500, // 5% IM  => up to 20x
             maint_margin_bps: 350, // 3.5% MM (70% of IM)
             recall_trigger_bps: 1500, // 15% move latches a recall
+            stress_floor: 0, // keeper-estimated O_stress; 0 until first push
+            phi_bps: 2500, // liquid ≥ 25% of reserved IM, unconditionally
             venues: vector[
                 VenueCfg { venue: DEEPBOOK, enabled: true, cap: 0, target_weight_bps: 5000 },
                 VenueCfg { venue: SUILEND, enabled: true, cap: 0, target_weight_bps: 3000 },
@@ -145,6 +153,40 @@ public fun collateral_params<C>(inst: &Institution<C>): (u16, u16, u16) {
     (cfg.init_margin_bps, cfg.maint_margin_bps, cfg.recall_trigger_bps)
 }
 
+/// Keeper/admin pushes a fresh stressed-outflow estimate (O_stress, absolute
+/// units) and/or retunes the unconditional reserved-IM floor fraction.
+public fun set_liquidity_floor<C>(
+    inst: &mut Institution<C>,
+    cap: &AdminCap,
+    stress_floor: u64,
+    phi_bps: u16,
+) {
+    institution::assert_admin(inst, cap);
+    assert!(phi_bps <= BPS_DENOM, errors::e_bad_params());
+    ensure_config(inst);
+    let cfg = df::borrow_mut<ConfigKey, RehypoConfig>(institution::uid_mut(inst), ConfigKey {});
+    cfg.stress_floor = stress_floor;
+    cfg.phi_bps = phi_bps;
+}
+
+/// The liquidity floor F = max(stress_floor, phi·reserved): liquid treasury may
+/// never be deployed below this (defaults apply if config was never installed).
+public fun required_floor<C>(inst: &Institution<C>): u64 {
+    let (stress, phi) = if (df::exists<ConfigKey>(institution::uid(inst), ConfigKey {})) {
+        let cfg = df::borrow<ConfigKey, RehypoConfig>(institution::uid(inst), ConfigKey {});
+        (cfg.stress_floor, cfg.phi_bps)
+    } else (0, 2500);
+    let phi_floor = ((institution::reserved_of(inst) as u128) * (phi as u128) / (BPS_DENOM as u128) as u64);
+    if (stress > phi_floor) stress else phi_floor
+}
+
+/// Liquid funds deployable without breaching the floor.
+public fun deployable<C>(inst: &Institution<C>): u64 {
+    let t = institution::total(inst);
+    let f = required_floor(inst);
+    if (t <= f) 0 else t - f
+}
+
 /// Principal currently rehypothecated to a single venue (0 if none).
 public fun principal_of<C>(inst: &Institution<C>, venue: u8): u64 {
     if (!df::exists<PrincipalKey>(institution::uid(inst), PrincipalKey { venue })) return 0;
@@ -197,6 +239,12 @@ public fun withdraw_for_rehypo<C>(
     assert!(venue <= NAVI, errors::e_bad_params());
     assert!(amount > 0, errors::e_zero_amount());
     assert!(amount <= institution::total(inst), errors::e_insufficient_liquidity());
+    // §2 invariant T ≥ F: a deploy may never leave liquid treasury below the
+    // risk floor, whatever the keeper proposed.
+    assert!(
+        institution::total(inst) - amount >= required_floor(inst),
+        errors::e_below_liquidity_floor(),
+    );
     let (enabled, venue_cap) = is_enabled(inst, venue);
     assert!(enabled, errors::e_bad_params());
     if (venue_cap > 0) {

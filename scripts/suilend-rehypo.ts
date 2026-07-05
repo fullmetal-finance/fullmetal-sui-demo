@@ -78,6 +78,29 @@ export function redeemTx(sender: string, ctokenCoinId: string): Transaction {
   return tx;
 }
 
+// FULL ROUND-TRIP in one PTB: supply AMOUNT USDC -> redeem the minted CToken ->
+// USDC back to sender. Run under dryRunTransactionBlock (NOT devInspect): dryRun
+// enforces function visibility and gas exactly like a real tx, and the same-PTB
+// redeem proves the recall leg without ever holding a position.
+function roundTripTx(sender: string, usdcCoinId: string): Transaction {
+  const tx = new Transaction();
+  tx.setSender(sender);
+  const [coin] = tx.splitCoins(tx.object(usdcCoinId), [AMOUNT]);
+  const ctoken = tx.moveCall({
+    target: DEPOSIT,
+    typeArguments: [MAIN_POOL, USDC],
+    arguments: [tx.object(MARKET), tx.pure.u64(RESERVE_INDEX), tx.object(CLOCK), coin],
+  });
+  const none = tx.moveCall({ target: "0x1::option::none", typeArguments: [EXEMPTION] });
+  const usdcBack = tx.moveCall({
+    target: REDEEM,
+    typeArguments: [MAIN_POOL, USDC],
+    arguments: [tx.object(MARKET), tx.pure.u64(RESERVE_INDEX), tx.object(CLOCK), ctoken, none],
+  });
+  tx.transferObjects([usdcBack], sender);
+  return tx;
+}
+
 async function main() {
   console.log("— Suilend mainnet rehypothecation (read + dry-run) —\n");
   await readReserve();
@@ -88,8 +111,6 @@ async function main() {
     console.log("  SUI_SENDER=<mainnet addr holding ~1 USDC> npx tsx suilend-rehypo.ts");
     return;
   }
-  // devInspect needs NO gas/SUI — pure simulation against live state. Fetch a
-  // USDC coin via raw RPC (robust across SDK client shapes).
   const res = await fetch(getJsonRpcFullnodeUrl("mainnet"), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -98,6 +119,21 @@ async function main() {
   const coin = res.result?.data?.[0];
   if (!coin) return console.log(`\n${SENDER} holds no native USDC on mainnet.`);
   console.log(`\nUsing USDC coin ${coin.coinObjectId.slice(0, 12)}… (balance ${Number(coin.balance) / 1e6} USDC)`);
+
+  if (process.env.DRYRUN) {
+    // supply -> redeem round trip, gas + visibility enforced, nothing committed.
+    const tx = roundTripTx(SENDER, coin.coinObjectId);
+    const bytes = await tx.build({ client });
+    const dr: any = await client.dryRunTransactionBlock({ transactionBlock: bytes });
+    const status = dr.effects?.status?.status;
+    console.log(`DRY-RUN supply→redeem ${Number(AMOUNT) / 1e6} USDC → status: ${status}`);
+    if (status !== "success") return console.log("  error:", dr.effects?.status?.error);
+    // balance delta on USDC should be ~0 (round trip) minus rounding dust
+    const delta = (dr.balanceChanges ?? []).find((b: any) => b.coinType === USDC);
+    console.log(`  USDC balance change: ${delta ? Number(delta.amount) / 1e6 : "0"} (round-trip dust only)`);
+    console.log("  ✓ deposit_liquidity_and_mint_ctokens AND redeem_ctokens_and_withdraw_liquidity both execute (public, gas-paid path)");
+    return;
+  }
 
   const tx = supplyTx(SENDER, coin.coinObjectId);
   const dr: any = await client.devInspectTransactionBlock({ sender: SENDER, transactionBlock: tx });

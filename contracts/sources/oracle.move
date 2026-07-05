@@ -13,6 +13,7 @@ module fullmetal::oracle;
 
 use std::string::String;
 use sui::clock::{Self, Clock};
+use sui::dynamic_field as df;
 use sui::event;
 use sui::table::{Self, Table};
 use fullmetal::errors;
@@ -161,3 +162,164 @@ public fun last_update_ms(oracle: &RiskOracle, symbol: String): u64 {
 }
 
 public fun price_scale(): u64 { PRICE_SCALE }
+
+// ===================================================================
+// EWMA volatility + latched trigger with hysteresis (additive upgrade).
+//
+// The original trigger is a single-print jump detector. This section
+// generalizes it to the estimator the risk doc specifies (RISK-RESPONSIVE-
+// REHYPOTHECATION.md §1): an EWMA variance — the GARCH(1,1) family reduced
+// to one multiply-add — with TWO latch conditions (shock z-score, absolute
+// regime ceiling) and an asymmetric release (deadband + N consecutive calm
+// prints), per EMIR Art. 28's "avoid disruptive or big step changes".
+//
+// Upgrade constraint: `Feed`'s layout is frozen (published struct), so the
+// vol state lives in a NEW struct stored as a dynamic field on the oracle,
+// keyed per symbol. `push_price_v2` = `push_price` + vol update; feeds
+// without vol state behave exactly as before.
+// ===================================================================
+
+/// Dynamic-field key for a feed's vol state.
+public struct VolKey has copy, drop, store { symbol: String }
+
+/// EWMA state + trigger calibration for one feed. All vol figures are in
+/// bps of price per print; variance is bps² (u128 to survive the products).
+public struct VolState has store {
+    var_bps2: u128, // EWMA variance (bpsΔprint)²
+    lambda_bps: u64, // decay λ (9400 = 0.94)
+    z_latch_x100: u64, // shock latch z* × 100 (400 = 4.0σ)
+    sigma_ceil_bps: u64, // regime latch: σ above this latches outright
+    theta_rel_bps: u64, // release deadband θ (7000 = release only below 0.7·ceil)
+    release_needed: u64, // N consecutive in-band prints to unlatch
+    release_count: u64,
+}
+
+public struct VolUpdated has copy, drop {
+    symbol: String,
+    sigma_bps: u64,
+    z_x100: u64,
+    triggered: bool,
+    auto_released: bool,
+}
+
+/// Admin arms EWMA vol tracking for an existing feed. `seed_sigma_bps` warms
+/// the estimator (a cold start of 0 would make every first print an ∞-σ shock).
+public fun enable_vol(
+    oracle: &mut RiskOracle,
+    _admin: &OracleAdminCap,
+    symbol: String,
+    seed_sigma_bps: u64,
+    lambda_bps: u64,
+    z_latch_x100: u64,
+    sigma_ceil_bps: u64,
+    theta_rel_bps: u64,
+    release_needed: u64,
+) {
+    assert!(table::contains(&oracle.feeds, symbol), errors::e_no_feed());
+    assert!(lambda_bps < 10_000, errors::e_bad_params());
+    assert!(theta_rel_bps < 10_000, errors::e_bad_params());
+    assert!(seed_sigma_bps > 0 && sigma_ceil_bps > 0 && release_needed > 0, errors::e_bad_params());
+    df::add(
+        &mut oracle.id,
+        VolKey { symbol },
+        VolState {
+            var_bps2: (seed_sigma_bps as u128) * (seed_sigma_bps as u128),
+            lambda_bps,
+            z_latch_x100,
+            sigma_ceil_bps,
+            theta_rel_bps,
+            release_needed,
+            release_count: 0,
+        },
+    );
+}
+
+/// push_price + EWMA update + latch/release. Identical to `push_price` for
+/// feeds without vol state, so keepers can switch to v2 unconditionally.
+public fun push_price_v2(
+    oracle: &mut RiskOracle,
+    keeper: &KeeperCap,
+    symbol: String,
+    new_price: u64,
+    clock: &Clock,
+) {
+    let prev = price(oracle, symbol); // asserts feed exists
+    push_price(oracle, keeper, symbol, new_price, clock); // legacy jump latch intact
+    if (!df::exists<VolKey>(&oracle.id, VolKey { symbol })) return;
+
+    let r_bps = jump_bps(prev, new_price);
+    let (sigma_bps, z_x100, latch, release_band) = {
+        let vs = df::borrow_mut<VolKey, VolState>(&mut oracle.id, VolKey { symbol });
+        // z against the PRE-update σ: a shock is a surprise vs. yesterday's calm.
+        let sigma_pre = isqrt_u128(vs.var_bps2);
+        let z_x100 = if (sigma_pre == 0) 0 else (r_bps as u128) * 100 / sigma_pre;
+        // EWMA update: var ← (λ·var + (1−λ)·r²) / 1e4
+        vs.var_bps2 =
+            ((vs.lambda_bps as u128) * vs.var_bps2 +
+             ((10_000 - vs.lambda_bps) as u128) * (r_bps as u128) * (r_bps as u128)) / 10_000;
+        let sigma_bps = (isqrt_u128(vs.var_bps2) as u64);
+        let latch = (z_x100 as u64) > vs.z_latch_x100 || sigma_bps > vs.sigma_ceil_bps;
+        let release_band =
+            sigma_bps < ((vs.sigma_ceil_bps as u128) * (vs.theta_rel_bps as u128) / 10_000 as u64)
+            && (z_x100 as u64) <= vs.z_latch_x100;
+        (sigma_bps, (z_x100 as u64), latch, release_band)
+    };
+
+    let feed = table::borrow_mut(&mut oracle.feeds, symbol);
+    let mut auto_released = false;
+    if (latch) {
+        feed.triggered = true;
+        let vs = df::borrow_mut<VolKey, VolState>(&mut oracle.id, VolKey { symbol });
+        vs.release_count = 0;
+    } else if (feed.triggered) {
+        // hysteresis: unlatch only after `release_needed` consecutive prints
+        // inside the deadband; any out-of-band print resets the count.
+        let vs = df::borrow_mut<VolKey, VolState>(&mut oracle.id, VolKey { symbol });
+        if (release_band) {
+            vs.release_count = vs.release_count + 1;
+            if (vs.release_count >= vs.release_needed) {
+                feed.triggered = false;
+                vs.release_count = 0;
+                auto_released = true;
+            }
+        } else {
+            vs.release_count = 0;
+        }
+    };
+    event::emit(VolUpdated {
+        symbol,
+        sigma_bps,
+        z_x100,
+        triggered: feed.triggered,
+        auto_released,
+    });
+}
+
+// ---- vol views ----
+
+public fun has_vol(oracle: &RiskOracle, symbol: String): bool {
+    df::exists<VolKey>(&oracle.id, VolKey { symbol })
+}
+
+/// Current EWMA σ in bps-per-print (0 if vol not enabled).
+public fun vol_bps(oracle: &RiskOracle, symbol: String): u64 {
+    if (!has_vol(oracle, symbol)) return 0;
+    (isqrt_u128(df::borrow<VolKey, VolState>(&oracle.id, VolKey { symbol }).var_bps2) as u64)
+}
+
+public fun release_progress(oracle: &RiskOracle, symbol: String): u64 {
+    if (!has_vol(oracle, symbol)) return 0;
+    df::borrow<VolKey, VolState>(&oracle.id, VolKey { symbol }).release_count
+}
+
+/// Integer sqrt (Newton), u128 → floor(sqrt).
+fun isqrt_u128(x: u128): u128 {
+    if (x < 2) return x;
+    let mut g = x;
+    let mut n = (x / 2) + 1;
+    while (n < g) {
+        g = n;
+        n = (x / n + n) / 2;
+    };
+    g
+}

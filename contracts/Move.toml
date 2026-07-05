@@ -1,6 +1,7 @@
 [package]
 name = "fullmetal"
-edition = "2024"
+# 2024.alpha (superset of 2024): needed for `extend module` in tests/pyth_ext.move
+edition = "2024.alpha"
 license = "MIT"
 
 # Sui framework is implicit. OZ math (audited) for signed PnL/funding + mul_div;
@@ -14,3 +15,6 @@ deepbook_margin = { r.mvr = "@deepbook/margin-trading/13" }
 
 [addresses]
 fullmetal = "0x0"
+# same value pyth's own manifest assigns — needed only so tests/pyth_ext.move
+# can name `pyth::price_info` (see that file's header note).
+pyth = "0xabf837e98c26087cba0883c0a7a28326b1fa3c5e1e2c5abdb486f9e8f594c837"
