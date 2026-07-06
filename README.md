@@ -55,6 +55,7 @@ A monorepo:
 | `contracts/` | Sui Move 2024 package (`fullmetal`) — institutions, OTC forwards, RFQ, direct offers, rehypothecation, risk oracle. |
 | `frontend/` | Next.js demo app — zkLogin, gasless sponsored transactions, live venue rates. See [frontend/README.md](frontend/README.md). |
 | `scripts/` | TypeScript deploy / RFQ / stats utilities (run with `tsx`). |
+| [whitepaper.md](https://github.com/fullmetal-finance/fullmetal-sui-demo/blob/main/whitepaper.md) | The whitepaper — protocol design, mathematics, RFQ information design, production path. |
 | [ARCHITECTURE.md](https://github.com/fullmetal-finance/fullmetal-sui-demo/blob/main/ARCHITECTURE.md) | Object model, accounting, capabilities & auth, lifecycle flows — the deep dive. |
 | [RISK-RESPONSIVE-REHYPOTHECATION.md](https://github.com/fullmetal-finance/fullmetal-sui-demo/blob/main/RISK-RESPONSIVE-REHYPOTHECATION.md) | The risk algorithm — volatility trigger, liquidity floor, venue allocation, per-venue adapters. |
 
