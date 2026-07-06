@@ -163,10 +163,12 @@ $$\text{pnl} = (p_1 - p_0)\cdot q \quad\text{in SD29x9},\qquad
 `settlement_interval_ms`): the keeper marks against the oracle price and the contract
 nets variation margin against funding *before* anything moves:
 
-$$\text{VM} = \text{pnl}(last\_mark \to mark),\qquad
-\text{funding} = \Big\lceil \tfrac{\text{notional}_{6dp}\cdot \text{funding\_bps}}{10^4} \Big\rceil$$
+$$\text{VM} = \text{pnl}(m_{prev} \to m_t),\qquad
+\text{funding} = \Big\lceil \tfrac{N_{6dp}\cdot f_{bps}}{10^4} \Big\rceil$$
 
-credits and debits accumulate on the long side and only the net difference transfers —
+where $m_{prev}$ is the mark at the previous settlement, $m_t$ the current oracle mark,
+$N_{6dp}$ the cached USD notional, and $f_{bps}$ the fixed per-interval funding rate.
+Credits and debits accumulate on the long side and only the net difference transfers —
 one transfer per interval, loser → winner, via the settlement hot potato.
 
 **The settlement hot potato.** `settlement::begin_settlement` debits the payer's *free*
@@ -278,7 +280,7 @@ $$\sigma_t^2 = \lambda\sigma_{t-1}^2 + (1-\lambda)r_t^2$$
 Two latch conditions (a shock and a regime rule — the BoE tool study shows level
 controls and shock controls fail in different dimensions, so both):
 
-$$z_t = |r_t|/\sigma_{t-1} > z^\* \;(=4) \qquad\text{or}\qquad \sigma_t > \sigma^{ceil}$$
+$$z_t = |r_t|/\sigma_{t-1} > z^{*} \;(=4) \qquad\text{or}\qquad \sigma_t > \sigma^{ceil}$$
 
 Release is asymmetric (EMIR Art. 28's "avoid disruptive or big step changes"):
 $\sigma < 0.7\,\sigma^{ceil}$ **and** $N{=}3$ consecutive in-band prints; any
@@ -474,7 +476,7 @@ retire naturally as these fill in.
 
 ## 11. Backtest plan
 
-Goal: calibrate $(\lambda, z^\*, \sigma^{ceil}, \theta_{rel}, N, \varphi, \alpha_{max})$
+Goal: calibrate $(\lambda, z^{*}, \sigma^{ceil}, \theta_{rel}, N, \varphi, \alpha_{max})$
 and *prove* the control loop dominates both "never rehypothecate" and "always
 rehypothecate" on real stress paths.
 
@@ -495,7 +497,7 @@ rehypothecate" on real stress paths.
    (b) *Yield*: net APR captured vs always-deployed ceiling. (c) *Stability*:
    trigger count, false-latch rate, recall-redeposit churn (deadband effectiveness) —
    BoE's two procyclicality metrics (peak-to-trough, n-day) applied to our deployment
-   series. (d) Parameter frontier: sweep $z^\*\!\times\!\sigma^{ceil}\!\times\!\varphi$,
+   series. (d) Parameter frontier: sweep $z^{*}\!\times\!\sigma^{ceil}\!\times\!\varphi$,
    plot safety-vs-yield Pareto, pick the knee.
 4. **Adversarial scenarios** (Chaos-style): synthetic paths — GARCH(1,1)-fitted with
    jump injection; venue liquidity forced to the 135-hour-pin profile during the jump;

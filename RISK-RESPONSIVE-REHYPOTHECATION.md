@@ -85,8 +85,8 @@ family, reduced to what a Move module can compute in one instruction.
 
 Two triggers, both cheap:
 
-1. **Shock**: standardized surprise $z_t = |r_t| / \sigma_{t-1}$ latches at $z_t > z^\*$
-   (default $z^\* = 4$). This subsumes the current jump trigger — a 15% print against a
+1. **Shock**: standardized surprise $z_t = |r_t| / \sigma_{t-1}$ latches at $z_t > z^{*}$
+   (default $z^{*} = 4$). This subsumes the current jump trigger — a 15% print against a
    calm 2% vol regime is a 7.5σ event — but also fires on a 6% print in a 1.4% regime,
    which a fixed threshold misses.
 2. **Regime**: $\sigma_t > \sigma^{ceil}$ (absolute ceiling per underlying, e.g. 8%/day
@@ -318,7 +318,7 @@ stateDiagram-v2
 
 | State | Entry | Action |
 |---|---|---|
-| **GREEN** | default | Maintain target allocation. Rebalance only when a venue drifts > 20% from target (deadband). Post-RED redeposits are **ramped**: ≤ ⅓ of $Y^\*$ per interval — the speed-limit tool from [BoE 597] §2.10 pointed at deployment instead of margin ("limit each day's call to, say, the 90th percentile of the historical distribution of one-day changes"), and the same shape as Chaos Labs' 2×-per-step cap growth. A false all-clear costs a third, not everything. |
+| **GREEN** | default | Maintain target allocation. Rebalance only when a venue drifts > 20% from target (deadband). Post-RED redeposits are **ramped**: ≤ ⅓ of $Y^{*}$ per interval — the speed-limit tool from [BoE 597] §2.10 pointed at deployment instead of margin ("limit each day's call to, say, the 90th percentile of the historical distribution of one-day changes"), and the same shape as Chaos Labs' 2×-per-step cap growth. A false all-clear costs a third, not everything. |
 | **AMBER** | any early warning: $\sigma > \theta_{warn}\,\sigma^{ceil}$; venue past its kink $U_v > U^*_v$; withdrawable coverage $A_v < P_v/\alpha_{rec}$; or floor breach $T < F$ | Freeze new deploys. Partial recall — sized $\Delta = (F-T)^+ + \varepsilon$ — drawn against venues in descending $CR_v$ (unwind the superlinear term first: most risk reduction per dollar moved). Targets become caps. The Apr-2026 event went 77% → 100% in ten hours: AMBER exists because that window is the whole game. |
 | **RED** | latched trigger (§1) | Full recall from **all** venues, permissionlessly (`recall_on_trigger` — no admin key at 3am). Order by gate risk: rate-limited / oracle-gated venues first, guaranteed-exit venue last — the reverse of instinct, because the gated exits are the ones that can close. |
 
@@ -334,7 +334,7 @@ rising significantly" — spend the buffer instantly in stress, rebuild it delib
 |---|---|---|---|
 | $\lambda$ | 0.94 | EWMA decay | GARCH-family variance model ([Chaos Aave methodology]; [BoE 597] baseline M1) |
 | $q$ | 0.99 | buffer quantile | SIMM 99% ([SIMM v2.4]); Chaos p99 ([Chaos Aave methodology]); CCP ≥99% ([Chicago Fed 2016]) |
-| $z^\*$ | 4 | shock latch, in σ | subsumes current 15%-print trigger |
+| $z^{*}$ | 4 | shock latch, in σ | subsumes current 15%-print trigger |
 | $\sigma^{ceil}$ | 8%/day (SPCX) | regime latch | per-underlying, admin-set |
 | $\theta_{rel}$, $N$ | 0.7, 3 prints | release deadband | EMIR "avoid big step changes" (Art. 28(1)); generalizes current 3-print recovery |
 | $\theta_{warn}$ | 0.85 | AMBER early warning | — |
@@ -424,5 +424,5 @@ primary source listed here.
 - [CoinDesk]: [FTX-era Solana congestion](https://www.coindesk.com/business/2022/11/09/cryptocom-halts-solana-usdc-and-usdt-deposits-withdrawals) — Solend's withdrawal/oracle degradation notice, Nov 2022.
 
 **Canonical allocation math** (referenced as upgrade path)
-- Kelly (1956), *A New Interpretation of Information Rate*; Thorp (2006), *The Kelly Criterion in Blackjack, Sports Betting, and the Stock Market* — $f^\*=\mu/\sigma^2$, fractional Kelly.
+- Kelly (1956), *A New Interpretation of Information Rate*; Thorp (2006), *The Kelly Criterion in Blackjack, Sports Betting, and the Stock Market* — $f^{*}=\mu/\sigma^2$, fractional Kelly.
 - Almgren & Chriss (2000), *Optimal Execution of Portfolio Transactions* — liquidation cost vs. speed against finite depth.
