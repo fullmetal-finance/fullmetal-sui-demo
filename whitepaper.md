@@ -218,7 +218,7 @@ sequenceDiagram
     M1->>RFQ: submit_quote — IM reserved (firm)
     M2->>RFQ: submit_quote — IM reserved (firm)
     Req->>F: accept_quote(best) — reserve own IM + rekey winner's
-    Note over F: contract live; loser withdraws or reclaims after TTL
+    Note over F: contract live — losing quotes withdraw or reclaim after TTL
 ```
 
 The firmness design is the differentiator: in TradFi and in Paradigm-style crypto RFQ,
@@ -333,7 +333,7 @@ stateDiagram-v2
     RED --> AMBER: σ < 0.7·ceil for N prints
     note right of RED: recall ALL venues — permissionless
     note right of AMBER: freeze deploys, restore T ≥ F
-    note right of GREEN: rebalance in deadband; post-RED redeposit ramped ≤⅓ per interval
+    note right of GREEN: rebalance in deadband, ramped post-RED redeposit
 ```
 
 Why the hard exit cap is non-negotiable — the measured record: Aave USDT went
