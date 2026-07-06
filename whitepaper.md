@@ -81,10 +81,10 @@ flowchart TB
     class DB,SL,NV vn
 ```
 
-Twelve Move modules in one package (`fullmetal`), Move 2024, deployed on Sui testnet with
-DeepBook margin as the live venue; Suilend and Navi integrations are validated against
-mainnet (§8). A Next.js front end drives the whole loop gaslessly via Enoki-sponsored
-zkLogin transactions.
+Thirteen Move modules in one package (`fullmetal`), Move 2024, deployed on Sui testnet
+with DeepBook margin as the live venue; Suilend and Navi integrations are validated
+against mainnet (§8). A Next.js front end drives the whole loop gaslessly via
+Enoki-sponsored zkLogin transactions.
 
 | Module | Role |
 |---|---|
@@ -92,6 +92,7 @@ zkLogin transactions.
 | `otc_forward` | the bilateral contract: MTM settlement, funding, liquidation |
 | `settlement` | atomic inter-institution value transfer (hot potato) |
 | `rfq`, `direct` | price formation: competitive quotes / named-counterparty offers |
+| `rfq_twoway` | information-disciplined RFQ — §5.1 Phase A, built (frontend cutover pending) |
 | `oracle` | keeper-pushed marks + EWMA volatility trigger with hysteresis |
 | `rehypo` | DeepBook-linked rehypothecation (testnet live path) |
 | `rehypo_router` | venue-agnostic rehypothecation core: config, floor, tickets |
@@ -183,13 +184,33 @@ liquidation signal.
 $$\text{IM}_{each} \ \text{negotiated}\ (\text{UI floor: } \max(\$1,\ 5\%\cdot\text{notional}) \Rightarrow \le 20\times),\qquad
 \text{MM}_{each} = \lfloor 0.70\cdot \text{IM}_{each}\rfloor$$
 
-**Liquidation** (as built): if the loser's $A$ cannot cover the interval's net,
-`final_settle` releases both IM fences and pays
-$\min(\text{owed}, A_{loser})$ to the winner — terminal status `LIQUIDATED`. Honest
-limitation, flagged in §9: maintenance margin is *recorded* but not yet *enforced* — a
-position can sit below MM between intervals without being liquidatable. Production
-requires an MM-breach liquidation path (`equity-vs-M` check crankable any time), making
-`total_required` load-bearing.
+**Liquidation** — two gates, one executor:
+
+- *Cadence path* (`settle`): if the loser's $A$ cannot cover the interval's net,
+  `final_settle` releases both IM fences and pays $\min(\text{owed}, A_{loser})$ to the
+  winner — terminal status `LIQUIDATED`.
+- *Maintenance-breach crank* (`settle_on_breach`, permissionless, no cadence gate):
+  the moment a position's **unrealized** net exceeds its MM buffer
+  ($\text{IM} - \text{MM} = 0.3\cdot\text{IM}$), anyone may force an immediate
+  settlement at the live mark. This is where **cross-margining is real**: the breach
+  does not kill the position — the loser's whole pooled treasury covers the payment
+  with zero margin-call latency, and the position re-marks and survives. Only an
+  *insolvent* breach starts the terminal path, and even then not instantly: the first
+  crank records an on-chain **margin call** (10-minute cure window, `MarginCalled`
+  event); only a breach that persists past the window — uncured by deposit, venue
+  recall, or mean-reversion — liquidates. The cure window exists because a
+  beneficiary-crankable instant liquidation would let the winner hand-pick the single
+  worst oracle wick and lock peak PnL (a confirmed attack in adversarial review).
+- Funding accrues **pro-rata in elapsed time** (elapsed/interval of the per-interval
+  rate), so any crank sequence telescopes to exactly the single-settlement charge —
+  per-call funding was a confirmed value leak once the crank existed.
+
+A note on why the crank polices *unrealized* loss and not firm cash: because every
+payment path is capped at $A$, firm equity can never be paid below $\Sigma$ reserved
+IM $\ge \Sigma$ maintenance — the cash-breach condition (equity $< M$) is structurally
+unreachable. Unrealized loss is the only quantity that can outrun the fences.
+Firm-level enforcement composes off-chain: a keeper watching $\Sigma$ unrealized across
+a desk's book cranks every breached contract in one PTB.
 
 ---
 
@@ -247,7 +268,10 @@ a trade happened") is standard practice; Paradigm's crypto MDRFQ runs ~75% anony
 two-way. Off-chain-quote/on-chain-settle (Hashflow, 1inch) removes pre-trade leakage
 entirely at the cost of a liveness-trusted quoting service.
 
-**The design, phased** (full matrix in the analysis; summary):
+**The design, phased** (full matrix in the analysis; summary). *Phase A is
+implemented on-chain as the `rfq_twoway` module (see ARCHITECTURE §10c) — the
+mechanism column below describes shipped code; the frontend still drives the
+legacy `rfq` until cutover:*
 
 | Information | Phase A (Move + UI only) | Phase B (Seal + Walrus) |
 |---|---|---|
@@ -400,7 +424,10 @@ three venues from their on-chain models — the adapter read-path is live.
 - **On-chain (testnet, live demo):** institution creation → deposit → direct + RFQ
   contract opening → interval settlement → rehypothecate → oracle spike →
   permissionless trigger recall → auto-redeposit. Gasless via Enoki/zkLogin.
-- **Unit tests: 21/21** — lifecycle, RFQ/direct/OTC economics, and the risk layer (the
+- **Unit tests: 36/36** — lifecycle, RFQ/direct/OTC economics, the two-way RFQ
+  (direction-hidden quoting, single-shot enforcement, bucket ceilings), cross-margining
+  (breach crank grace + margin-call-then-liquidate, funding telescoping), and the risk
+  layer (the
   full EWMA shock→latch→release trace with hand-computed variance values, counter reset
   on re-shock, regime latch with no single large print, floor blocking at the exact
   boundary, ticket round-trip accounting with interest realizing into equity, venue-cap
@@ -426,10 +453,12 @@ load-bearing items:
    KeeperCap + UpgradeCap (+ the demo maker desks and server routes). Production: split
    per-capability keys, multisig ProtocolCap/UpgradeCap, timelocked upgrades and witness
    allowlisting, per-tenant AdminCap m-of-n.
-3. **Maintenance margin must become load-bearing.** Today liquidation only fires when an
-   interval's net exceeds the loser's free funds; `maintenance_each`/`total_required`
-   are recorded but unenforced. Production: a permissionless MM-breach liquidation crank
-   (equity vs $M$), with a liquidation incentive to make cranking self-funding.
+3. **Maintenance margin — BUILT** (§4): the permissionless `settle_on_breach` crank
+   with pro-rata funding and a margin-call cure window, adversarially reviewed (two
+   confirmed attack classes — per-crank funding over-collection and wick-picked
+   terminal liquidation — both fixed and regression-tested). Remaining production
+   item: a liquidation incentive so third-party cranking is self-funding, and the
+   keeper daemon that watches `mm_breached` across the book.
 4. **Receipt provenance.** `confirm_rehypo<R: store>` trusts the adapter's receipt.
    Production: allowlist adapter witnesses exactly like OTC witnesses (the mechanism
    already exists in `protocol.move`), so only audited adapters can confirm; typed
@@ -512,7 +541,7 @@ defaults.
 
 | Phase | Contents |
 |---|---|
-| **A — protocol hardening** | MM-breach liquidation crank; Pyth marks + guards; RFQ Phase A (two-way quotes, single-shot, size buckets, targeted-by-default); adapter witness allowlist; keeper daemon; key split/multisig |
+| **A — protocol hardening** | ~~MM-breach liquidation crank~~ (built, §4); ~~RFQ Phase A two-way quoting~~ (built, §5.1 — frontend cutover pending); Pyth marks + guards; adapter witness allowlist; keeper daemon + liquidation incentive; key split/multisig |
 | **B — risk automation** | keeper allocation optimizer over the venue adapters; backtest-calibrated parameters; venue history recorder; risk console |
 | **C — privacy** | Seal sealed-bid RFQ (on-chain winner decryption); encrypted activity/decision logs to Walrus for auditors + parent institutions; ephemeral requester identities |
 | **D — scale** | real maker network; institution membership binding; cross-margin across derivative types (options next to forwards/perps in the same pool — the $M$ aggregation is already SIMM-shaped); AI venue-risk monitor |

@@ -13,6 +13,7 @@ module fullmetal::otc_forward;
 
 use std::string::String;
 use sui::clock::{Self, Clock};
+use sui::dynamic_field as df;
 use sui::event;
 use openzeppelin_fp_math::sd29x9;
 use openzeppelin_fp_math::sd29x9_base;
@@ -28,6 +29,10 @@ use fullmetal::settlement;
 
 const PRICE_UNIT: u64 = 1_000_000; // 1e6 scale for prices and quantities
 const MAINTENANCE_BPS: u64 = 7_000; // maintenance margin = 70% of IM
+/// Margin-call cure window: an insolvent MM breach must persist this long —
+/// uncured by deposit, venue recall, or mean-reversion — before it may be
+/// liquidated (anti wick-picking; see `settle_on_breach`).
+const CURE_WINDOW_MS: u64 = 600_000; // 10 minutes
 const U64_MAX: u128 = 18_446_744_073_709_551_615;
 
 const STATUS_ACTIVE: u8 = 0;
@@ -83,6 +88,19 @@ public struct IntervalSettled has copy, drop {
     ts_ms: u64,
 }
 public struct ContractLiquidated has copy, drop { otc_id: ID, mark: u64, recovered: u64 }
+
+/// Dynamic-field key for a pending margin call (value: the call's ms timestamp).
+public struct MarginCallKey has copy, drop, store {}
+
+/// An insolvent MM breach was recorded; the desk has until `deadline_ms` to
+/// cure (deposit / recall from venues / mean-reversion) before a still-live
+/// breach becomes liquidatable.
+public struct MarginCalled has copy, drop {
+    otc_id: ID,
+    mark: u64,
+    owed: u64,
+    deadline_ms: u64,
+}
 public struct ContractClosed has copy, drop { otc_id: ID, mark: u64, final_amount: u64 }
 
 /// Open a bilateral forward: reserve IM from both pools, create + share the
@@ -289,10 +307,129 @@ public fun settle<C>(
     assert!(oracle::has_feed(oracle, fwd.underlying), errors::e_wrong_oracle_feed());
     let now = clock::timestamp_ms(clock);
     assert!(now >= fwd.last_settle_ms + fwd.settlement_interval_ms, errors::e_not_due_yet());
-
     let mark = oracle::price(oracle, fwd.underlying);
-    let (short_pays_long, amount) = compute_net(fwd, mark);
+    settle_at_mark(fwd, long_inst, short_inst, allow, mark, now, ctx);
+}
+
+/// MM buffer: the unrealized loss a position may carry before anyone can force
+/// settlement — the slice of IM above maintenance (im − 0.7·im = 30% of IM).
+public fun mm_buffer<C>(fwd: &OtcForward<C>): u64 {
+    fwd.im_each - fwd.maintenance_each
+}
+
+/// True iff the losing side's unrealized net (VM + funding since `last_mark`)
+/// at the current oracle mark exceeds the MM buffer — the keeper's watch
+/// predicate, and the gate on `settle_on_breach`.
+public fun mm_breached<C>(fwd: &OtcForward<C>, oracle: &RiskOracle, clock: &Clock): bool {
+    if (fwd.status != STATUS_ACTIVE) return false;
+    if (!oracle::has_feed(oracle, fwd.underlying)) return false;
+    let (_, amount) = compute_net(fwd, oracle::price(oracle, fwd.underlying), clock::timestamp_ms(clock));
+    amount > mm_buffer(fwd)
+}
+
+/// If a margin call is pending, the ms timestamp after which a still-breached,
+/// still-insolvent position may be liquidated (for the keeper/UI).
+public fun margin_call_deadline<C>(fwd: &OtcForward<C>): Option<u64> {
+    if (df::exists_<MarginCallKey>(&fwd.id, MarginCallKey {})) {
+        option::some(*df::borrow<MarginCallKey, u64>(&fwd.id, MarginCallKey {}) + CURE_WINDOW_MS)
+    } else option::none()
+}
+
+fun clear_margin_call<C>(fwd: &mut OtcForward<C>) {
+    if (df::exists_<MarginCallKey>(&fwd.id, MarginCallKey {})) {
+        df::remove<MarginCallKey, u64>(&mut fwd.id, MarginCallKey {});
+    }
+}
+
+/// MAINTENANCE-BREACH CRANK — permissionless, no cadence gate. Makes
+/// maintenance margin load-bearing and cross-margining real:
+///
+///  * TEETH: the moment a position's unrealized loss consumes its IM buffer
+///    above maintenance, ANYONE may force an immediate settlement at the live
+///    mark — no waiting for the interval, no admin key at 3am.
+///  * GRACE (the cross-margin benefit): a breach does NOT kill the position.
+///    The loser's whole pooled treasury — free cash, recalled yield, capital
+///    not fenced by other contracts — covers the payment with zero
+///    margin-call latency, exactly as `settle` would. If the pool covers, the
+///    position re-marks and SURVIVES; only a pool that cannot pay liquidates.
+///
+/// Firm-level enforcement composes from this: a keeper watching Σ unrealized
+/// across a desk's book cranks every breached contract in one PTB. The
+/// firm-CASH analogue (equity < Σ maintenance) is deliberately absent — it is
+/// unreachable here: every payment is capped at `available`, so equity never
+/// drops below Σ reserved IM ≥ Σ maintenance. Unrealized loss is the only
+/// quantity that can outrun the fences, and this crank polices it.
+public fun settle_on_breach<C>(
+    fwd: &mut OtcForward<C>,
+    long_inst: &mut Institution<C>,
+    short_inst: &mut Institution<C>,
+    oracle: &RiskOracle,
+    allow: &OtcAllowlist,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    assert_parties(fwd, long_inst, short_inst);
+    assert!(fwd.status == STATUS_ACTIVE, errors::e_contract_not_active());
+    assert!(oracle::has_feed(oracle, fwd.underlying), errors::e_wrong_oracle_feed());
+    let now = clock::timestamp_ms(clock);
+    let mark = oracle::price(oracle, fwd.underlying);
+    let (short_pays_long, amount) = compute_net(fwd, mark, now);
+    assert!(amount > mm_buffer(fwd), errors::e_healthy());
+
+    let payer_can_cover = if (short_pays_long) {
+        institution::available(short_inst) >= amount
+    } else {
+        institution::available(long_inst) >= amount
+    };
+    if (payer_can_cover) {
+        // GRACE: the pool covers — settle and survive. A breach settlement IS
+        // a settlement: it re-marks and restarts the interval clock.
+        settle_at_mark(fwd, long_inst, short_inst, allow, mark, now, ctx);
+        return
+    };
+
+    // Insolvent at this mark. NOT instantly terminal: a permissionless,
+    // beneficiary-crankable liquidation with no delay lets the winner pick the
+    // single worst oracle tick and lock peak PnL even if the move immediately
+    // mean-reverts (confirmed wick-picking attack). Instead: the first crank
+    // records an on-chain MARGIN CALL; only a breach that persists past the
+    // cure window — with the payer still unable to cover — may liquidate. The
+    // desk cures by depositing, recalling from venues, or the mark reverting;
+    // any successful settlement clears the call.
+    if (!df::exists_<MarginCallKey>(&fwd.id, MarginCallKey {})) {
+        df::add(&mut fwd.id, MarginCallKey {}, now);
+        event::emit(MarginCalled {
+            otc_id: object::id(fwd),
+            mark,
+            owed: amount,
+            deadline_ms: now + CURE_WINDOW_MS,
+        });
+        return
+    };
+    let called_ms = *df::borrow<MarginCallKey, u64>(&fwd.id, MarginCallKey {});
+    assert!(now >= called_ms + CURE_WINDOW_MS, errors::e_cure_window_active());
+    // window elapsed, still breached, still insolvent → terminal. (If the desk
+    // topped up in the meantime, payer_can_cover above already took the grace
+    // path instead.)
+    settle_at_mark(fwd, long_inst, short_inst, allow, mark, now, ctx);
+}
+
+/// Shared pay-or-liquidate core for `settle` (cadence-gated) and
+/// `settle_on_breach` (MM-gated). Caller has validated parties, status, feed,
+/// and its own gate.
+fun settle_at_mark<C>(
+    fwd: &mut OtcForward<C>,
+    long_inst: &mut Institution<C>,
+    short_inst: &mut Institution<C>,
+    allow: &OtcAllowlist,
+    mark: u64,
+    now: u64,
+    ctx: &mut TxContext,
+) {
+    let (short_pays_long, amount) = compute_net(fwd, mark, now);
     let otc_id = object::id(fwd);
+    // any completed settlement supersedes a pending margin call
+    clear_margin_call(fwd);
 
     if (amount == 0) {
         fwd.last_mark = mark;
@@ -340,7 +477,7 @@ public fun close<C>(
         errors::e_not_expired(),
     );
     let mark = oracle::price(oracle, fwd.underlying);
-    let (short_pays_long, amount) = compute_net(fwd, mark);
+    let (short_pays_long, amount) = compute_net(fwd, mark, clock::timestamp_ms(clock));
     let otc_id = object::id(fwd);
     let final_amount = if (short_pays_long) {
         final_settle(fwd, short_inst, long_inst, allow, amount, STATUS_SETTLED, ctx)
@@ -374,9 +511,21 @@ fun assert_parties<C>(fwd: &OtcForward<C>, long_inst: &Institution<C>, short_ins
 
 /// Net obligation for this step (VM from last_mark→mark, plus one funding
 /// accrual). Returns (short_pays_long, amount_6dp).
-fun compute_net<C>(fwd: &OtcForward<C>, mark_1e6: u64): (bool, u64) {
+fun compute_net<C>(fwd: &OtcForward<C>, mark_1e6: u64, now: u64): (bool, u64) {
     let (vm_mag, long_gains) = pnl_6dp(fwd.last_mark, mark_1e6, fwd.notional);
-    let funding = muldiv(fwd.notional_6dp, fwd.funding_rate_bps, 10_000, true);
+    // Funding accrues with TIME, not with settlement count: `funding_rate_bps`
+    // buys one full interval's funding; a settlement `elapsed` ms after the
+    // previous one charges elapsed/interval of it (rounded up). Charging per
+    // CALL was a confirmed value leak once `settle_on_breach` existed — the
+    // funding recipient could bill one full funding per crank, K per interval.
+    // Pro-rata makes any crank sequence telescope to exactly the elapsed-time
+    // charge. interval == 0 (settle-anytime) keeps the per-settlement charge.
+    let funding_full = muldiv(fwd.notional_6dp, fwd.funding_rate_bps, 10_000, true);
+    let funding = if (fwd.settlement_interval_ms == 0) funding_full
+    else {
+        let elapsed = if (now > fwd.last_settle_ms) now - fwd.last_settle_ms else 0;
+        muldiv(funding_full, elapsed, fwd.settlement_interval_ms, true)
+    };
 
     let mut long_credit = 0u64;
     let mut long_debit = 0u64;

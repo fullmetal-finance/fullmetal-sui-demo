@@ -57,6 +57,7 @@ const EHealthy: u64 = 73; // liquidation attempted on a healthy position
 const ENotExpired: u64 = 74;
 const EWrongOracleFeed: u64 = 75; // oracle symbol does not match the contract underlying
 const EZeroNotional: u64 = 76;
+const ECureWindowActive: u64 = 77; // liquidation attempted before the margin-call cure window elapsed
 
 // --- rfq (90–109) ---
 const ERfqNotOpen: u64 = 90;
@@ -73,6 +74,9 @@ const EQuoteOutlivesRfq: u64 = 101;
 const ENotQuoteOwner: u64 = 102;
 const EBadParams: u64 = 103;
 const EReservationMismatch: u64 = 104; // rekey magnitudes != expected
+const ECrossedQuote: u64 = 105; // two-way quote with bid > ask
+const EAlreadyQuoted: u64 = 106; // maker already used its single shot on this RFQ
+const EOverBucket: u64 = 107; // accept notional exceeds the RFQ's bucket ceiling
 
 // --- direct offer (110–119) ---
 const EOfferNotLive: u64 = 110;
@@ -119,6 +123,7 @@ public(package) fun e_healthy(): u64 { EHealthy }
 public(package) fun e_not_expired(): u64 { ENotExpired }
 public(package) fun e_wrong_oracle_feed(): u64 { EWrongOracleFeed }
 public(package) fun e_zero_notional(): u64 { EZeroNotional }
+public(package) fun e_cure_window_active(): u64 { ECureWindowActive }
 public(package) fun e_rfq_not_open(): u64 { ERfqNotOpen }
 public(package) fun e_rfq_expired(): u64 { ERfqExpired }
 public(package) fun e_not_targeted(): u64 { ENotTargeted }
@@ -133,6 +138,9 @@ public(package) fun e_quote_outlives_rfq(): u64 { EQuoteOutlivesRfq }
 public(package) fun e_not_quote_owner(): u64 { ENotQuoteOwner }
 public(package) fun e_bad_params(): u64 { EBadParams }
 public(package) fun e_reservation_mismatch(): u64 { EReservationMismatch }
+public(package) fun e_crossed_quote(): u64 { ECrossedQuote }
+public(package) fun e_already_quoted(): u64 { EAlreadyQuoted }
+public(package) fun e_over_bucket(): u64 { EOverBucket }
 public(package) fun e_offer_not_live(): u64 { EOfferNotLive }
 public(package) fun e_offer_expired(): u64 { EOfferExpired }
 public(package) fun e_offer_not_expired(): u64 { EOfferNotExpired }

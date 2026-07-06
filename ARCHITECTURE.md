@@ -39,6 +39,8 @@ The package is `fullmetal` (Move 2024, framework + OZ math + `deepbook_margin`).
 | `otc_forward` | product | Bilateral forward contract object; MTM, funding, liquidation; the `open_from_rfq` + `RfqWitness` seam | OZ `fp_math`, `math` |
 | `rfq` | product | Request-for-quote: firm collateral-backed quotes → atomic single-signer accept | — |
 | `direct` | product | Direct bilateral offer ("type the counterparty's org ID"): proposer fixes all terms + commits collateral first → named desk accepts. Mirror of `rfq`, reuses `open_from_rfq`/`RfqWitness` | — |
+| `rfq_twoway` | product | Information-disciplined RFQ ([WHITEPAPER §5.1](WHITEPAPER.md) Phase A): no direction on the request, bid+ask two-way quotes, single-shot per maker, size-bucket ceilings, id-only events. Reuses `RfqWitness`/`open_from_rfq`; supersedes `rfq` at frontend cutover | — |
+| `rehypo_router` | core | Venue-agnostic rehypothecation: admin-tunable `RehypoConfig` (margin bps, liquidity floor, per-venue enable/cap/weight), per-venue receipt + principal dynamic-field slots, hot-potato supply/recall tickets for **external** venue adapter packages (Suilend / Navi) | — |
 
 ```
 errors ── events
@@ -46,12 +48,13 @@ errors ── events
    ├── protocol (OtcAllowlist, ProtocolCap)
    ├── registry (HandleRegistry)
    ├── institution ◄──────── settlement
-   │       ▲   ▲
-   │       │   └────────────── rehypo ──► deepbook_margin (MarginPool / SupplierCap)
+   │       ▲   ▲   ▲
+   │       │   │   └────────── rehypo ──► deepbook_margin (MarginPool / SupplierCap)
+   │       │   └────────────── rehypo_router ──► external venue adapters (PTB tickets)
    │       │
    │     oracle ──► otc_forward ──► OZ fp_math (SD29x9) + math (mul_div)
-   │                    ▲   ▲
-   │                  rfq   direct   (both reuse open_from_rfq + RfqWitness)
+   │   (EWMA vol)       ▲   ▲   ▲
+   │                  rfq  direct  rfq_twoway   (all reuse open_from_rfq + RfqWitness)
 ```
 
 ---
@@ -209,6 +212,19 @@ keeper pushing a far-off price → `triggered = true` → permissionless
 `recall_on_trigger` becomes callable. (Pyth pull-oracle integration is the
 stretch upgrade; Pyth is already available transitively via `deepbook_margin`.)
 
+**EWMA volatility layer (additive upgrade).** `enable_vol` arms a per-symbol
+`VolState` (a dynamic field on the oracle — `Feed`'s layout is upgrade-frozen)
+and `push_price_v2` = `push_price` + one integer multiply-add:
+`var ← (λ·var + (1−λ)·r²)/1e4`, all in bps². Two latches — a **shock**
+(`z = |r|/σ_prev > z*`, default 4σ) and a **regime ceiling** (`σ > σ_ceil`) —
+and an asymmetric release: σ must decay below `θ_rel·σ_ceil` (0.7) for `N`
+consecutive in-band prints, any out-of-band print resetting the counter. A
+larger shock therefore earns a longer cool-down with no extra rule. Feeds
+without vol state behave exactly as before, so keepers switch to v2
+unconditionally. Views: `vol_bps`, `has_vol`, `release_progress`. The math and
+its calibration anchors are derived in
+[RISK-RESPONSIVE-REHYPOTHECATION.md](RISK-RESPONSIVE-REHYPOTHECATION.md) §1.
+
 ---
 
 ## 8. Capital flow
@@ -272,12 +288,38 @@ rehypothecate(amount)                 recall(amount) / recall_on_trigger(symbol)
   note_supplied(amount)
 ```
 
+### Venue-agnostic rehypothecation (rehypo_router — Suilend / Navi path)
+External venue adapters cannot touch `treasury_mut`/`note_supplied`
+(`public(package)`), so the router exposes a public hot-potato seam. The
+tickets have no `drop`: a PTB that debits the treasury and fails to complete
+the deposit aborts whole.
+```
+supply:  (coin, ticket) = withdraw_for_rehypo(inst, cap, venue, amt)   // floor F + venue-cap asserts
+         receipt        = <venue adapter>::supply(coin, …)             // typed venue call
+         confirm_rehypo(inst, ticket, Some(receipt))                    // store receipt + note_supplied
+recall:  (receipt, t2)  = begin_recall<R>(inst, cap, venue)
+         coin            = <venue adapter>::recall(receipt, …)
+         finish_recall(inst, t2, coin)                                  // rejoin + note_recalled
+```
+`withdraw_for_rehypo` enforces the liquidity floor `T − amount ≥ F` where
+`F = max(stress_floor, phi_bps·reserved)` — the
+[risk doc §2](RISK-RESPONSIVE-REHYPOTHECATION.md) invariant; the keeper
+proposes `stress_floor`, the chain enforces it. Config, receipts, and
+per-venue principals all live in dynamic fields (no `Institution` struct
+change). Receipt types per venue: DeepBook `SupplierCap` (reused), Suilend
+`Coin<CToken>` (consumed on redeem), Navi `AccountCap` (reused) — round-trips
+validated against live mainnet in `scripts/` (see [scripts/README.md](scripts/README.md)).
+
 ### OTC forward
 ```mermaid
 flowchart TD
     O[open: reserve IM both sides, share OtcForward] --> S
     S{settle each interval} -->|loser covers| V[move net VM+funding loser→winner] --> S
     S -->|loser cannot cover| L[liquidate: release both IMs, pay winner capped, status=LIQUIDATED]
+    O --> B{settle_on_breach — permissionless, anytime unrealized net > 0.3·IM}
+    B -->|pool covers| V
+    B -->|insolvent, first crank| M[margin call recorded, 10-min cure window] --> B
+    B -->|insolvent past window| L
     O --> C[close at expiry: final MTM, release IMs, status=SETTLED]
 
     classDef open fill:#dbeafe,stroke:#3b6db5,color:#13294b;
@@ -285,12 +327,24 @@ flowchart TD
     classDef good fill:#d8f0e0,stroke:#2f8559,color:#0f3d28;
     classDef bad fill:#fbe0db,stroke:#b4341f,color:#5a160c;
     class O open
-    class S decision
+    class S,B decision
     class V,C good
     class L bad
-    linkStyle 1 stroke:#2f8559,stroke-width:2px
-    linkStyle 3 stroke:#b4341f,stroke-width:2px
+    class M decision
 ```
+
+The **maintenance-breach crank** (`settle_on_breach`) is what makes
+cross-margining real: a breached-but-solvent position is cured by the pooled
+treasury with zero margin-call latency and survives; an insolvent breach must
+persist through an on-chain margin call (`MarginCalled`, `CURE_WINDOW_MS` =
+10 min) before it may liquidate — a one-print wick that mean-reverts cannot
+kill a position (anti wick-picking, confirmed and fixed in adversarial
+review). Funding accrues **pro-rata in elapsed time**, so crank sequences
+telescope to exactly the single-settlement charge. The firm-cash breach
+(equity < Σ maintenance) is structurally unreachable — payments are capped at
+`available`, so equity never drops below Σ reserved IM; unrealized loss is
+the only quantity that can outrun the fences, and the crank polices it.
+Views for keepers/UI: `mm_buffer`, `mm_breached`, `margin_call_deadline`.
 
 ---
 
@@ -373,6 +427,35 @@ permissionless TTL reclaim.
 
 ---
 
+## 10c. Two-way RFQ — information-disciplined price formation (BUILT)
+
+`rfq_twoway` is Phase A of the leakage design in
+[WHITEPAPER §5.1](WHITEPAPER.md): the original `rfq` broadcasts, in plaintext,
+everything an adversary needs to front-run the winner's hedge (direction,
+notional, limit band, every maker's live price with identity). The two-way
+module keeps the exact firm-quote machinery — maker IM reserved at quote time
+under `RfqWitness`, no last look, single-signer accept via `open_from_rfq` —
+and removes the leaks:
+
+```
+open_two_way            NO side field; bucket CEILING instead of exact notional; no price band
+submit_two_way_quote    maker posts BID and ASK (crossed markets abort); ONE shot per maker
+                        per RFQ — withdrawing frees the IM bond but never restores the shot
+accept_two_way          requester picks the side (take_ask) + exact notional (≤ ceiling)
+                        — direction exists nowhere on-chain before this call
+events                  object ids + expiries only: no identities, prices, sides, or sizes
+```
+
+One IM reservation backs the two-way quote because only one side can ever
+execute. Counterparty identity stays readable on the shared objects (makers
+need it for credit) but leaves the indexed event stream. Post-trade,
+`ContractOpened` still discloses terms — sealing that is Phase C
+(Seal/Walrus). New abort codes: `ECrossedQuote` (105), `EAlreadyQuoted` (106),
+`EOverBucket` (107). `rfq` remains deployed and drives the current demo;
+the frontend cutover retires it.
+
+---
+
 ## 11. Design decisions (with evidence)
 
 | Decision | Choice | Why |
@@ -419,9 +502,17 @@ permissionless TTL reclaim.
 
 ## 13. Deployment — LIVE on testnet
 
-The package **builds, unit-tests pass** (12 tests; `contracts/run-tests.sh`), and
-is **deployed to testnet**, with the full rehypothecation loop, the RFQ path, and
+The package **builds, unit-tests pass** (36 tests; see
+[contracts/README.md](contracts/README.md) for the toolchain notes), and is
+**deployed to testnet**, with the full rehypothecation loop, the RFQ path, and
 the direct-offer path all proven on-chain with real DBUSDC.
+
+> **Deployed vs. built:** the modules added since the last publish —
+> `rehypo_router`, `rfq_twoway`, the oracle EWMA layer, and the
+> `settle_on_breach` crank — are in-repo, compiled, and fully unit-tested but
+> **not yet on testnet**; they ship with the next package upgrade (all changes
+> are upgrade-compatible: additive modules/functions/structs only, frozen
+> signatures untouched).
 
 **How the dependency-publish hurdle was solved — MVR.** Publishing links against
 the deployed DeepBook on testnet; the deepbookv3 source revs ship no publish
@@ -465,14 +556,28 @@ does not), so the version is pinned. OZ math stays a git dep (it ships
 
 ## 14. Deferred / roadmap (contract side)
 
+Built since the original roadmap: ~~MM-breach enforcement~~ (`settle_on_breach`
+crank + margin-call cure window, §9), ~~EWMA volatility trigger~~ (§7),
+~~venue-agnostic rehypothecation core~~ (`rehypo_router`, §9),
+~~information-disciplined RFQ~~ (`rfq_twoway`, §10c), ~~ISDA-style grace before
+close-out~~ (the 10-min cure window is exactly this). Still deferred:
+
 - **Off-chain signed quotes** — ed25519-signed maker quotes redeemed on-chain
   (Paradigm/0x style) for streaming scale, reusing `open_from_rfq` (see §10).
-  The on-chain firm-quote RFQ is built; this is the scale seam.
+- **Sealed-bid quotes** — Seal threshold-encrypted prices on `rfq_twoway`,
+  winner decrypted on-chain in `accept_two_way` (WHITEPAPER §5.1 Phase B).
 - **Makers competing on funding rate** (not just price), and IM-band negotiation.
-- **Cross-margin risk netting** — offset longs/shorts into one health number
-  (currently a reservation sum); a standalone computed-view engine over `contracts`.
+- **Firm-level health view** — Σ unrealized across a desk's book (keeper reads
+  `mm_breached` per contract today; an on-chain aggregate needs contract marks
+  pushed to the institution).
+- **Liquidation incentive** — a bounty so third-party cranking of
+  `settle_on_breach` is self-funding.
 - **Trader-initiated withdrawal** — `withdraw_permission` is stored but no
   trader-signed withdraw entry yet.
-- **Pyth oracle** — replace/augment the keeper oracle with Pyth pull updates.
-- **ISDA-style grace/notice** before close-out; **maker/checker** on treasury moves.
-- **Partial-recall handling** under DeepBook withdrawal rate limits (mainnet).
+- **Pyth oracle** — replace/augment the keeper oracle's *marks* with Pyth pull
+  updates (the EWMA/trigger layer sits above whichever mark source).
+- **Maker/checker** on treasury moves; **Suilend/Navi typed adapter packages**
+  (the PTB round-trips are validated; the Move adapters + allowlisted adapter
+  witnesses are the production form).
+- **Partial-recall handling** under venue withdrawal limits (Suilend's outflow
+  rate limiter, Navi oracle-freshness gating — measured in `scripts/`).

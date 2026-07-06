@@ -52,9 +52,9 @@ A monorepo:
 
 | Path | What |
 |---|---|
-| `contracts/` | Sui Move 2024 package (`fullmetal`) — institutions, OTC forwards, RFQ, direct offers, rehypothecation, risk oracle. |
-| `frontend/` | Next.js demo app — zkLogin, gasless sponsored transactions, live venue rates. See [frontend/README.md](frontend/README.md). |
-| `scripts/` | TypeScript deploy / RFQ / stats utilities (run with `tsx`). |
+| `contracts/` | Sui Move package (`fullmetal`) — institutions, OTC forwards (with maintenance-breach liquidation), RFQ + two-way RFQ, direct offers, venue-agnostic rehypothecation, EWMA risk oracle. See [contracts/README.md](contracts/README.md). |
+| `frontend/` | Next.js demo app — zkLogin, gasless sponsored transactions, live venue rates + risk reads. See [frontend/README.md](frontend/README.md). |
+| `scripts/` | TypeScript deploy utilities + live-mainnet venue validations (Suilend/Navi round-trips). See [scripts/README.md](scripts/README.md). |
 | [WHITEPAPER.md](https://github.com/fullmetal-finance/fullmetal-sui-demo/blob/main/WHITEPAPER.md) | The whitepaper — protocol design, mathematics, RFQ information design, production path. |
 | [ARCHITECTURE.md](https://github.com/fullmetal-finance/fullmetal-sui-demo/blob/main/ARCHITECTURE.md) | Object model, accounting, capabilities & auth, lifecycle flows — the deep dive. |
 | [RISK-RESPONSIVE-REHYPOTHECATION.md](https://github.com/fullmetal-finance/fullmetal-sui-demo/blob/main/RISK-RESPONSIVE-REHYPOTHECATION.md) | The risk algorithm — volatility trigger, liquidity floor, venue allocation, per-venue adapters. |
@@ -85,22 +85,33 @@ npm run dev          # http://localhost:3000  (needs frontend/.env.local)
 ```
 
 The Move package builds and tests with the [Sui CLI](https://docs.sui.io/guides/developer/getting-started/sui-install)
-(`cd contracts && sui move test`). Deployment goes through the SDK
-(`scripts/deploy-test.ts`) rather than the CLI — see ARCHITECTURE.md §12–13 for the MVR
-and protocol-version details.
+**≥ 1.74** (`cd contracts && sui move test` — 36 tests; toolchain notes incl. the
+pyth test shim in [contracts/README.md](contracts/README.md)). Deployment goes
+through the SDK (`scripts/deploy-test.ts`) rather than the CLI — see
+ARCHITECTURE.md §12–13 for the MVR and protocol-version details.
 
 ## Roadmap (next ~4 months)
 
-- Rehypothecation-venue risk-management algorithm; cross-margining across derivative types.
-- Backtesting across market regimes; capital-efficiency benchmarking vs TradFi and crypto OTC.
+- ~~Rehypothecation risk algorithm~~ — designed with verified sources and the core is
+  built: EWMA volatility trigger with hysteresis, on-chain liquidity floor,
+  venue-agnostic router ([RISK-RESPONSIVE-REHYPOTHECATION.md](https://github.com/fullmetal-finance/fullmetal-sui-demo/blob/main/RISK-RESPONSIVE-REHYPOTHECATION.md)). Next: the keeper allocator.
+- ~~Cross-margining enforcement~~ — built: the maintenance-breach settlement crank with
+  pooled-treasury grace and a margin-call cure window (WHITEPAPER §4).
+- Backtesting across market regimes; capital-efficiency benchmarking vs TradFi and
+  crypto OTC (plan in WHITEPAPER §11).
 - Real institutional on-ramp.
-- Privacy layer for OTC trades, with encrypted activity and decision logs (**Seal + Walrus**)
-  accessible only to auditors and the parent institution.
+- Privacy layer for OTC trades — Phase A (two-way RFQ, direction hidden on-chain) is
+  built at the contract layer; sealed bids + encrypted logs (**Seal + Walrus**) next
+  (WHITEPAPER §5.1).
 - AI layer for monitoring rehypothecation-venue activity and dynamically evaluating risk.
 
 ## Status
 
-MVP on Sui testnet. The contract suite (institution, OTC forward, RFQ, direct offer,
-rehypothecation, oracle) is deployed, and the rehypothecate → trigger → recall →
-redeposit loop is proven on-chain. Live object IDs and the roadmap are in
+MVP on Sui testnet. The deployed suite (institution, OTC forward, RFQ, direct offer,
+DeepBook rehypothecation, oracle) has the full rehypothecate → trigger → recall →
+redeposit loop proven on-chain. Since the last publish (shipping with the next
+upgrade, all additive): the EWMA risk trigger, the venue-agnostic rehypothecation
+router with the liquidity floor, the maintenance-breach liquidation crank, and the
+two-way RFQ — 36/36 unit tests. Suilend and Navi supply→recall round-trips are
+validated against live mainnet (`scripts/`). Live object IDs in
 [ARCHITECTURE.md](https://github.com/fullmetal-finance/fullmetal-sui-demo/blob/main/ARCHITECTURE.md) §13–14.

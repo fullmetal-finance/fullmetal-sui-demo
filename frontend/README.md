@@ -15,8 +15,11 @@ the [Fullmetal](../README.md) protocol end-to-end on Sui testnet.
 
 - **Real on-chain (testnet):** creating an institution, depositing, opening OTC forwards
   (direct + RFQ-accept), rehypothecate / recall, the oracle trigger and recall.
-- **Live mainnet reads:** USDC supply APRs for DeepBook margin, Suilend, and Navi —
-  computed from each pool's on-chain interest model (`/api/rates`, no API keys).
+- **Live mainnet reads:** USDC supply APRs **plus per-venue risk metrics**
+  (utilization, withdrawable liquidity, rate-model kink — the venue-adapter reads
+  of RISK-RESPONSIVE-REHYPOTHECATION.md §4) for DeepBook margin, Suilend, and
+  Navi — computed from each pool's on-chain interest model (`/api/rates`, no API
+  keys; response has `rates`, `live`, and `risk` blocks).
 - **Mocked for the demo:** the off-chain institution profile (localStorage), the maker
   quote-service responses, the trader roster, incoming RFQs, and the on-ramp card.
 
@@ -68,7 +71,7 @@ app/
     faucet              mock fiat on-ramp (mints + returns DBUSDC)
     oracle              keeper push / spike / recall sequence
     makers              mock competing RFQ quotes
-    rates               live USDC supply APRs (DeepBook / Suilend / Navi)
+    rates               live USDC supply APRs + venue risk reads (DeepBook / Suilend / Navi)
 lib/
   fullmetal.ts          on-chain config — package, singletons, Move-call targets
   sponsored.ts          gasless execute hook (build kind → sponsor → sign → execute)

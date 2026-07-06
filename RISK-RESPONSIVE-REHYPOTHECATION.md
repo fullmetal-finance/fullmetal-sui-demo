@@ -62,11 +62,14 @@ field — no struct migration).
 
 ## 1. The volatility signal — EWMA with a latched trigger
 
-**What we have today** (`oracle.move`): a single-print jump detector — latch when
-$|\Delta|/p_{prev} >$ 15%, sticky until cleared, 3-print recovery in the keeper. This is
-the degenerate case of the right estimator, with the memory parameter set to zero.
+**The original trigger** (`oracle.move`, still live for un-armed feeds): a single-print
+jump detector — latch when $|\Delta|/p_{prev} >$ 15%, sticky until cleared, 3-print
+recovery in the keeper. This is the degenerate case of the right estimator, with the
+memory parameter set to zero.
 
-**The generalization** — EWMA on returns $r_t = (p_t - p_{t-1})/p_{t-1}$:
+**The generalization — NOW BUILT** (`enable_vol` + `push_price_v2`; tested in
+`risk_tests.move` with hand-computed variance traces) — EWMA on returns
+$r_t = (p_t - p_{t-1})/p_{t-1}$:
 
 $$\sigma_t^2 = \lambda\,\sigma_{t-1}^2 + (1-\lambda)\,r_t^2 \qquad \lambda = 0.94$$
 
@@ -312,7 +315,7 @@ stateDiagram-v2
     AMBER --> GREEN: signals clear
     RED --> AMBER: σ < 0.7·σceil for N prints (unlatch)
     note right of RED: recall ALL venues, permissionless (recall_on_trigger)
-    note right of AMBER: no new deploys; skim to restore T ≥ F
+    note right of AMBER: no new deploys — skim to restore T ≥ F
     note right of GREEN: rebalance only outside ±drift band
 ```
 
@@ -386,15 +389,26 @@ chain to simulate; both ask it to enforce.
 An adversarial keeper can therefore propose a *suboptimal* allocation, never an
 *unsafe* one.
 
-## 8. Implementation order
+## 8. Implementation status
 
-1. **EWMA + hysteresis in `oracle.move`** — replaces the fixed jump trigger; the demo
-   is unchanged (a 15% SPCX print latches instantly at $z \gg 4$).
-2. **Floor assert in `withdraw_for_rehypo`** + $F$ in `RehypoConfig` — the §2 invariant.
-3. **Adapter reads** (extend `/api/rates` with $A_v$, $U_v$, kink) + keeper allocation.
-4. **AMBER partial-recall path** (`recall` already takes an amount; sizing is §5).
+1. ✅ **EWMA + hysteresis in `oracle.move`** — `enable_vol` / `push_price_v2`, both
+   latches, deadband release with counter reset; the demo is unchanged (a 15% SPCX
+   print latches instantly at $z \gg 4$). Tested with hand-computed variance traces
+   (`risk_tests.move`), including the emergent bigger-shock-longer-cooldown property.
+2. ✅ **Floor assert in `withdraw_for_rehypo`** — `stress_floor` + `phi_bps` in
+   `RehypoConfig`, `required_floor`/`deployable` views, `set_liquidity_floor` keeper
+   push. The chain enforces $T \ge F$; the keeper only proposes.
+3. ✅ **Adapter reads** — `/api/rates` serves $A_v$, $U_v$, and the kink per venue
+   (`risk` block). ⏳ Keeper allocation loop (§3 scoring) still to build.
+4. ⏳ **AMBER partial-recall path** — on-chain `recall` already takes an amount;
+   the §5 sizing rule lands with the keeper.
 5. Later: multi-underlying $\sigma_p$ netting, fractional-Kelly / mean-variance
-   objective, backtests against the §4 stress windows.
+   objective, backtests against the §4 stress windows (plan: WHITEPAPER §11).
+
+Related enforcement built alongside (see WHITEPAPER §4): the maintenance-breach
+settlement crank `settle_on_breach` — the position-level teeth this document's
+portfolio-level loop composes with — including pro-rata funding and a 10-minute
+margin-call cure window, both shaped by adversarial review.
 
 ## 9. Sources
 
