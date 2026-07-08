@@ -234,6 +234,40 @@ public fun enable_vol(
     );
 }
 
+/// Admin retunes an ALREADY-armed feed's trigger calibration in place —
+/// makes the vol layer genuinely admin-tunable (enable_vol is set-once; this is
+/// how you change λ / z* / ceiling / deadband / N without disturbing the live
+/// EWMA variance or the current trigger latch). `release_count` is reset so the
+/// hysteresis restarts cleanly under the new deadband.
+public fun retune_vol(
+    oracle: &mut RiskOracle,
+    _admin: &OracleAdminCap,
+    symbol: String,
+    lambda_bps: u64,
+    z_latch_x100: u64,
+    sigma_ceil_bps: u64,
+    theta_rel_bps: u64,
+    release_needed: u64,
+) {
+    assert!(df::exists_<VolKey>(&oracle.id, VolKey { symbol }), errors::e_no_feed());
+    assert!(lambda_bps < 10_000, errors::e_bad_params());
+    assert!(theta_rel_bps < 10_000, errors::e_bad_params());
+    assert!(sigma_ceil_bps > 0 && release_needed > 0, errors::e_bad_params());
+    let vs = df::borrow_mut<VolKey, VolState>(&mut oracle.id, VolKey { symbol });
+    vs.lambda_bps = lambda_bps;
+    vs.z_latch_x100 = z_latch_x100;
+    vs.sigma_ceil_bps = sigma_ceil_bps;
+    vs.theta_rel_bps = theta_rel_bps;
+    vs.release_needed = release_needed;
+    vs.release_count = 0;
+}
+
+/// Admin disarms EWMA tracking (feed reverts to the legacy jump trigger).
+public fun disable_vol(oracle: &mut RiskOracle, _admin: &OracleAdminCap, symbol: String) {
+    assert!(df::exists_<VolKey>(&oracle.id, VolKey { symbol }), errors::e_no_feed());
+    let VolState { .. } = df::remove<VolKey, VolState>(&mut oracle.id, VolKey { symbol });
+}
+
 /// push_price + EWMA update + latch/release. Identical to `push_price` for
 /// feeds without vol state, so keepers can switch to v2 unconditionally.
 public fun push_price_v2(
@@ -315,11 +349,14 @@ public fun release_progress(oracle: &RiskOracle, symbol: String): u64 {
 /// Integer sqrt (Newton), u128 → floor(sqrt).
 fun isqrt_u128(x: u128): u128 {
     if (x < 2) return x;
-    let mut g = x;
-    let mut n = (x / 2) + 1;
-    while (n < g) {
-        g = n;
-        n = (x / n + n) / 2;
+    // Newton descent from an over-estimate. Initial guess (x+1)/2 sits ABOVE
+    // sqrt(x) for all x >= 2, so the sequence decreases monotonically to
+    // floor(sqrt(x)) (e.g. x=2 -> 1, x=3 -> 1, x=4 -> 2).
+    let mut n = x;
+    let mut y = (x + 1) / 2;
+    while (y < n) {
+        n = y;
+        y = (x / y + y) / 2;
     };
-    g
+    n
 }

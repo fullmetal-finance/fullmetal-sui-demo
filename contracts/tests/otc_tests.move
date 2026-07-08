@@ -144,14 +144,17 @@ fun push(sc: &mut ts::Scenario, keeper_id: ID, price: u64) {
     ts::return_shared(oracle);
 }
 
-fun do_settle(sc: &mut ts::Scenario, w: &World) {
+fun do_settle(sc: &mut ts::Scenario, w: &World) { do_settle_at(sc, w, 0) }
+
+fun do_settle_at(sc: &mut ts::Scenario, w: &World, ms: u64) {
     sc.next_tx(OP);
     let mut fwd = ts::take_shared<OtcForward<FAKE>>(sc);
     let mut a = ts::take_shared_by_id<Institution<FAKE>>(sc, w.a_inst);
     let mut b = ts::take_shared_by_id<Institution<FAKE>>(sc, w.b_inst);
     let oracle = ts::take_shared<RiskOracle>(sc);
     let allow = ts::take_shared<OtcAllowlist>(sc);
-    let clk = clock::create_for_testing(sc.ctx());
+    let mut clk = clock::create_for_testing(sc.ctx());
+    clock::set_for_testing(&mut clk, ms);
     otc_forward::settle<FAKE>(&mut fwd, &mut a, &mut b, &oracle, &allow, &clk, sc.ctx());
     clock::destroy_for_testing(clk);
     ts::return_shared(fwd);
@@ -191,18 +194,34 @@ fun adverse_move_liquidates_long() {
     let w = setup(&mut sc, 250_000_000, 1_000_000_000);
     open_forward(&mut sc, &w, 200_000_000);
     push(&mut sc, w.keeper, 1_000_000); // -50% -> long loses $100 > $50 free
-    do_settle(&mut sc, &w);
 
+    // cadence settle now honors the cure window too (same as settle_on_breach):
+    // an insolvent settle records a MARGIN CALL, it does not liquidate on the spot.
+    do_settle_at(&mut sc, &w, 0);
+    sc.next_tx(OP);
+    {
+        let a = ts::take_shared_by_id<Institution<FAKE>>(&sc, w.a_inst);
+        let fwd = ts::take_shared<OtcForward<FAKE>>(&sc);
+        assert!(otc_forward::status(&fwd) == 0, 1); // still ACTIVE
+        assert!(institution::total(&a) == 250_000_000, 2); // nothing moved yet
+        let dl = otc_forward::margin_call_deadline(&fwd);
+        assert!(option::is_some(&dl), 3);
+        ts::return_shared(a);
+        ts::return_shared(fwd);
+    };
+
+    // uncured past the window -> liquidation
+    do_settle_at(&mut sc, &w, 600_000); // CURE_WINDOW_MS
     sc.next_tx(OP);
     {
         let a = ts::take_shared_by_id<Institution<FAKE>>(&sc, w.a_inst);
         let b = ts::take_shared_by_id<Institution<FAKE>>(&sc, w.b_inst);
         let fwd = ts::take_shared<OtcForward<FAKE>>(&sc);
         // long paid $100 out of its $250; IM released, position liquidated
-        assert!(institution::total(&a) == 150_000_000, 1);
-        assert!(institution::total(&b) == 1_100_000_000, 2);
-        assert!(otc_forward::status(&fwd) == 2, 3); // STATUS_LIQUIDATED
-        assert!(institution::reserved_of(&a) == 0, 4); // IM released on liquidation
+        assert!(institution::total(&a) == 150_000_000, 4);
+        assert!(institution::total(&b) == 1_100_000_000, 5);
+        assert!(otc_forward::status(&fwd) == 2, 6); // STATUS_LIQUIDATED
+        assert!(institution::reserved_of(&a) == 0, 7); // IM released on liquidation
         ts::return_shared(a);
         ts::return_shared(b);
         ts::return_shared(fwd);

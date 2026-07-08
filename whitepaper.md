@@ -184,33 +184,38 @@ liquidation signal.
 $$\text{IM}_{each} \ \text{negotiated}\ (\text{UI floor: } \max(\$1,\ 5\%\cdot\text{notional}) \Rightarrow \le 20\times),\qquad
 \text{MM}_{each} = \lfloor 0.70\cdot \text{IM}_{each}\rfloor$$
 
-**Liquidation** — two gates, one executor:
+**Liquidation** — two entry gates, one shared decision (`settle_at_mark`):
 
-- *Cadence path* (`settle`): if the loser's $A$ cannot cover the interval's net,
-  `final_settle` releases both IM fences and pays $\min(\text{owed}, A_{loser})$ to the
-  winner — terminal status `LIQUIDATED`.
-- *Maintenance-breach crank* (`settle_on_breach`, permissionless, no cadence gate):
-  the moment a position's **unrealized** net exceeds its MM buffer
-  ($\text{IM} - \text{MM} = 0.3\cdot\text{IM}$), anyone may force an immediate
-  settlement at the live mark. This is where **cross-margining is real**: the breach
-  does not kill the position — the loser's whole pooled treasury covers the payment
-  with zero margin-call latency, and the position re-marks and survives. Only an
-  *insolvent* breach starts the terminal path, and even then not instantly: the first
-  crank records an on-chain **margin call** (10-minute cure window, `MarginCalled`
-  event); only a breach that persists past the window — uncured by deposit, venue
-  recall, or mean-reversion — liquidates. The cure window exists because a
-  beneficiary-crankable instant liquidation would let the winner hand-pick the single
-  worst oracle wick and lock peak PnL (a confirmed attack in adversarial review).
+- *Cadence path* (`settle`, once the interval is due) and *maintenance-breach crank*
+  (`settle_on_breach`, permissionless, any time a position's **unrealized** net exceeds
+  its MM buffer $\text{IM} - \text{MM} = 0.3\cdot\text{IM}$) both funnel into the same
+  pay-vs-call-vs-liquidate core, so **both honor the cure window** (an earlier version
+  let cadence `settle` instant-liquidate, which reopened the wick-picking attack the
+  crank was built to close — fixed in audit).
+- **Pay & survive** iff free funds are *physically present*: economic `available` (never
+  touch fenced IM) **and** physical `total` (can't hand over funds sitting at a venue)
+  both cover the net. This is where **cross-margining is real** — the loser's pooled
+  treasury absorbs the loss and the position re-marks and lives.
+- **Otherwise** — insolvent, or free funds still deployed to a venue — the first
+  observation records an on-chain **margin call** (`MarginCalled`, 10-minute cure
+  window); the desk cures by depositing, recalling from a venue, or the mark reverting.
+  Only a call aged past the window, still uncovered, liquidates: `final_settle` releases
+  both IM fences and pays $\min(\text{owed}, \text{total}_{loser})$ (physical, since
+  venue funds can't move without a recall) to the winner. A one-print wick that
+  mean-reverts can never kill a position (the confirmed anti-wick-picking property).
 - Funding accrues **pro-rata in elapsed time** (elapsed/interval of the per-interval
-  rate), so any crank sequence telescopes to exactly the single-settlement charge —
-  per-call funding was a confirmed value leak once the crank existed.
+  rate; a settle-anytime `interval = 0` contract carries none), so any crank sequence
+  telescopes to exactly the single-settlement charge — per-call funding was a confirmed
+  value leak once the crank existed.
 
-A note on why the crank polices *unrealized* loss and not firm cash: because every
-payment path is capped at $A$, firm equity can never be paid below $\Sigma$ reserved
-IM $\ge \Sigma$ maintenance — the cash-breach condition (equity $< M$) is structurally
-unreachable. Unrealized loss is the only quantity that can outrun the fences.
-Firm-level enforcement composes off-chain: a keeper watching $\Sigma$ unrealized across
-a desk's book cranks every breached contract in one PTB.
+Two structural notes. (1) Settlement is **pause-exempt**: honoring an existing contract
+obligation is not a discretionary action, so a losing desk cannot self-pause to
+repudiate its losses (pause still stops its *own* withdrawals and new contracts). (2) The
+crank polices *unrealized* loss, not firm cash: every payment is capped at `available`,
+so equity can never be paid below $\Sigma$ reserved IM $\ge \Sigma$ maintenance — the
+cash-breach condition (equity $< M$) is structurally unreachable. Firm-level enforcement
+composes off-chain: a keeper watching $\Sigma$ unrealized across a desk's book cranks
+every breached contract in one PTB.
 
 ---
 
@@ -278,7 +283,7 @@ legacy `rfq` until cutover:*
 | **Direction** | **eliminated**: drop `requester_side`; makers quote **bid AND ask**; side chosen only inside `accept_quote`; events carry neither | — |
 | **Quote prices** | single-shot firm quotes (no withdraw-and-requote), short simultaneous window | **sealed bids**: price ciphertext under Seal threshold encryption; policy = "requester, or anyone after t_close"; the winning quote decrypts **on-chain** in `accept_quote` (`seal::bf_hmac_encryption`); losers never revealed |
 | Requester identity | ephemeral per-RFQ addresses (zkLogin/Enoki already sponsors); events stripped to ids-only | reveal-to-winner at accept |
-| Notional | size buckets in object + events; exact size fixed at accept | exact size sealed to targeted makers |
+| Notional | request carries a size-bucket ceiling only (not the exact size); events omit both; exact size fixed at accept | exact size sealed to targeted makers |
 | Limit band | never on-chain (client-side only — today's UI already sends 0/0) | sealed |
 | Dealer panel | default UI to 3–5 targeted makers (the `targets` set exists); broadcast becomes the exception | policy-gated RFQ visibility per maker institution |
 | Winner / post-trade | plaintext (bilateral credit + keeper marking need it) | Phase C: sealed terms + margin attestations, after the keeper path is redesigned |
@@ -423,8 +428,10 @@ three venues from their on-chain models — the adapter read-path is live.
 
 - **On-chain (testnet, live demo):** institution creation → deposit → direct + RFQ
   contract opening → interval settlement → rehypothecate → oracle spike →
-  permissionless trigger recall → auto-redeposit. Gasless via Enoki/zkLogin.
-- **Unit tests: 36/36** — lifecycle, RFQ/direct/OTC economics, the two-way RFQ
+  **permissionless trigger recall** (the recall is the on-chain automatic part;
+  redeposit once volatility subsides is a keeper/frontend action that calls
+  `rehypothecate` again). Gasless via Enoki/zkLogin.
+- **Unit tests: 40/40** — lifecycle, RFQ/direct/OTC economics, the two-way RFQ
   (direction-hidden quoting, single-shot enforcement, bucket ceilings), cross-margining
   (breach crank grace + margin-call-then-liquidate, funding telescoping), and the risk
   layer (the

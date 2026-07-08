@@ -19,8 +19,8 @@ Fullmetal replaces that stack with one protocol:
 
 - **Collateral stays productive** — posted margin is rehypothecated to yield-bearing
   venues instead of sitting idle.
-- **Risk response is automatic and on-chain** — a volatility trigger recalls collateral
-  permissionlessly, then redeposits once markets calm.
+- **Risk response is automatic and on-chain** — a volatility trigger makes the recall
+  permissionless (anyone can crank it); collateral redeposits once markets calm.
 - **Cross-margining across derivative types** lowers initial-margin requirements, unlocking
   higher risk-adjusted leverage.
 
@@ -85,7 +85,7 @@ npm run dev          # http://localhost:3000  (needs frontend/.env.local)
 ```
 
 The Move package builds and tests with the [Sui CLI](https://docs.sui.io/guides/developer/getting-started/sui-install)
-**≥ 1.74** (`cd contracts && sui move test` — 36 tests; toolchain notes incl. the
+**≥ 1.74** (`cd contracts && sui move test` — 40 tests; toolchain notes incl. the
 pyth test shim in [contracts/README.md](contracts/README.md)). Deployment goes
 through the SDK (`scripts/deploy-test.ts`) rather than the CLI — see
 ARCHITECTURE.md §12–13 for the MVR and protocol-version details.
@@ -111,7 +111,8 @@ MVP on Sui testnet. The deployed suite (institution, OTC forward, RFQ, direct of
 DeepBook rehypothecation, oracle) has the full rehypothecate → trigger → recall →
 redeposit loop proven on-chain. Since the last publish (shipping with the next
 upgrade, all additive): the EWMA risk trigger, the venue-agnostic rehypothecation
-router with the liquidity floor, the maintenance-breach liquidation crank, and the
-two-way RFQ — 36/36 unit tests. Suilend and Navi supply→recall round-trips are
-validated against live mainnet (`scripts/`). Live object IDs in
+router with the liquidity floor, the maintenance-breach liquidation crank, the
+two-way RFQ, and audit-driven settlement hardening — 40/40 unit tests. Suilend and
+Navi supply→recall round-trips are validated against live mainnet (`scripts/`). Live
+object IDs in
 [ARCHITECTURE.md](https://github.com/fullmetal-finance/fullmetal-sui-demo/blob/main/ARCHITECTURE.md) §13–14.

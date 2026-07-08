@@ -273,6 +273,12 @@ public fun confirm_rehypo<C, R: store>(
         // first deposit for this venue: stash the lender handle
         df::add(institution::uid_mut(inst), ReceiptKey { venue }, option::destroy_some(receipt));
     } else {
+        // top-up: a receipt for this venue must already exist, else the credited
+        // principal would be un-recallable (begin_recall aborts with no receipt).
+        assert!(
+            df::exists_<ReceiptKey>(institution::uid(inst), ReceiptKey { venue }),
+            errors::e_bad_params(),
+        );
         option::destroy_none(receipt);
     };
     add_principal(inst, venue, amount);

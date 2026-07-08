@@ -58,6 +58,7 @@ const ENotExpired: u64 = 74;
 const EWrongOracleFeed: u64 = 75; // oracle symbol does not match the contract underlying
 const EZeroNotional: u64 = 76;
 const ECureWindowActive: u64 = 77; // liquidation attempted before the margin-call cure window elapsed
+const EExpiredUseClose: u64 = 78; // settle/breach on an expired contract — call close instead
 
 // --- rfq (90–109) ---
 const ERfqNotOpen: u64 = 90;
@@ -124,6 +125,7 @@ public(package) fun e_not_expired(): u64 { ENotExpired }
 public(package) fun e_wrong_oracle_feed(): u64 { EWrongOracleFeed }
 public(package) fun e_zero_notional(): u64 { EZeroNotional }
 public(package) fun e_cure_window_active(): u64 { ECureWindowActive }
+public(package) fun e_expired_use_close(): u64 { EExpiredUseClose }
 public(package) fun e_rfq_not_open(): u64 { ERfqNotOpen }
 public(package) fun e_rfq_expired(): u64 { ERfqExpired }
 public(package) fun e_not_targeted(): u64 { ENotTargeted }

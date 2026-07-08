@@ -20,6 +20,7 @@ use deepbook_margin::margin_registry::MarginRegistry;
 use fullmetal::errors;
 use fullmetal::institution::{Self, Institution, AdminCap};
 use fullmetal::oracle::{Self, RiskOracle};
+use fullmetal::rehypo_router;
 
 /// Dynamic-field key under which the institution's SupplierCap lives.
 public struct SupplierCapKey has copy, drop, store {}
@@ -48,6 +49,14 @@ public fun rehypothecate<C>(
     institution::assert_admin(inst, cap);
     assert!(amount > 0, errors::e_zero_amount());
     assert!(amount <= institution::total(inst), errors::e_insufficient_liquidity());
+    // Same liquidity-floor invariant the venue-agnostic router enforces: a
+    // deploy may never leave liquid treasury below F (default 25% of reserved
+    // IM). Keeps "deploys can never breach the floor" true on the DeepBook path
+    // too, not just the Suilend/Navi router path.
+    assert!(
+        institution::total(inst) - amount >= rehypo_router::required_floor(inst),
+        errors::e_below_liquidity_floor(),
+    );
     ensure_cap(inst, registry, clock, ctx);
 
     let coin = coin::take(institution::treasury_mut(inst), amount, ctx);

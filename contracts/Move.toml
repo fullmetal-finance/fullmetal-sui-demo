@@ -6,8 +6,8 @@ license = "MIT"
 
 # Sui framework is implicit. OZ math (audited) for signed PnL/funding + mul_div;
 # deepbook_margin for rehypothecation into the DeepBook lending pool (pulls
-# deepbook, token, pyth, wormhole transitively). MVR is unavailable on this CLI,
-# so all OZ deps use the git form pinned to the audited v1.2.0 tag.
+# deepbook, token, pyth, wormhole transitively). OZ deps use the git form pinned
+# to the audited v1.2.0 tag; deepbook_margin resolves via MVR (see contracts/README).
 [dependencies]
 openzeppelin_math = { git = "https://github.com/OpenZeppelin/contracts-sui.git", subdir = "math/core", rev = "v1.2.0" }
 openzeppelin_fp_math = { git = "https://github.com/OpenZeppelin/contracts-sui.git", subdir = "math/fixed_point", rev = "v1.2.0" }

@@ -100,8 +100,12 @@ fun grant(sc: &mut ts::Scenario, inst_id: ID, admin_id: ID): ID {
     tid
 }
 
-/// alice long / bobsec short, 100 units @ $2.00, hourly settlement.
+/// alice long / bobsec short, 100 units @ $2.00, hourly settlement, no expiry.
 fun open_forward(sc: &mut ts::Scenario, w: &World, funding_bps: u64) {
+    open_full(sc, w, funding_bps, HOUR_MS, 0)
+}
+
+fun open_full(sc: &mut ts::Scenario, w: &World, funding_bps: u64, interval: u64, expiry: u64) {
     sc.next_tx(OP);
     let mut a = ts::take_shared_by_id<Institution<FAKE>>(sc, w.a_inst);
     let mut b = ts::take_shared_by_id<Institution<FAKE>>(sc, w.b_inst);
@@ -112,13 +116,22 @@ fun open_forward(sc: &mut ts::Scenario, w: &World, funding_bps: u64) {
     otc_forward::open<FAKE>(
         &mut a, &ta, &mut b, &tb, &allow,
         string::utf8(SUI), 100_000_000, 2_000_000, IM,
-        funding_bps, false /* short pays funding */, HOUR_MS, 0, &clk, sc.ctx(),
+        funding_bps, false /* short pays funding */, interval, expiry, &clk, sc.ctx(),
     );
     clock::destroy_for_testing(clk);
     ts::return_to_sender(sc, ta);
     ts::return_to_sender(sc, tb);
     ts::return_shared(allow);
     ts::return_shared(a);
+    ts::return_shared(b);
+}
+
+fun pause_short(sc: &mut ts::Scenario, w: &World) {
+    sc.next_tx(OP);
+    let mut b = ts::take_shared_by_id<Institution<FAKE>>(sc, w.b_inst);
+    let cap = ts::take_from_sender_by_id<AdminCap>(sc, w.b_admin);
+    institution::pause(&mut b, &cap, sc.ctx());
+    ts::return_to_sender(sc, cap);
     ts::return_shared(b);
 }
 
@@ -280,15 +293,24 @@ fun liquidation_inside_cure_window_aborts() {
 }
 
 #[test]
-#[expected_failure] // EHealthy: a wick that mean-reverts cannot liquidate
-fun wick_that_reverts_cannot_liquidate() {
+fun wick_that_reverts_clears_the_call_no_liquidation() {
     let mut sc = ts::begin(OP);
     let w = setup(&mut sc, 1_000_000_000, 210_000_000);
     open_forward(&mut sc, &w, 0);
     push(&mut sc, w.keeper, 2_700_000); // wick: short owes $70 > $10 free
     crank(&mut sc, &w, 0); // margin call recorded at the wick
-    push(&mut sc, w.keeper, 2_000_000); // ...and the wick reverts
-    crank(&mut sc, &w, CURE_MS); // window elapsed, but no breach anymore → abort
+    push(&mut sc, w.keeper, 2_000_000); // ...and the wick reverts (healthy again)
+    // a crank on the now-healthy position CLEARS the stale call rather than
+    // liquidating off it — even though the window has elapsed. No fresh breach,
+    // no liquidation; the position is untouched.
+    crank(&mut sc, &w, CURE_MS);
+    sc.next_tx(OP);
+    {
+        let fwd = ts::take_shared<OtcForward<FAKE>>(&sc);
+        assert!(otc_forward::status(&fwd) == 0, 40); // ACTIVE
+        assert!(option::is_none(&otc_forward::margin_call_deadline(&fwd)), 41); // call gone
+        ts::return_shared(fwd);
+    };
     ts::end(sc);
 }
 
@@ -378,6 +400,56 @@ fun funding_pro_rata_telescopes_across_cranks() {
         // two cranks total $146 == one hypothetical single settle at t=60m
         // @3.40: VM $140 + one full funding $6. No leak from crank count.
         assert!(ta == 1_146_000_000 && tb == 854_000_000, 31);
+    };
+    ts::end(sc);
+}
+
+/// A losing desk cannot dodge settlement by pausing itself: settlement honors an
+/// existing obligation and is pause-exempt. (Pause still blocks the desk's own
+/// withdrawals / new contracts.)
+#[test]
+fun paused_loser_still_settles() {
+    let mut sc = ts::begin(OP);
+    let w = setup(&mut sc, 1_000_000_000, 1_000_000_000);
+    open_forward(&mut sc, &w, 0);
+    push(&mut sc, w.keeper, 2_300_000); // +15% -> short owes $30, well within its pool
+    pause_short(&mut sc, &w); // loser freezes itself to try to escape the mark
+    plain_settle(&mut sc, &w, HOUR_MS); // must STILL move the VM
+    sc.next_tx(OP);
+    {
+        let (ta, tb) = totals(&sc, &w);
+        assert!(ta == 1_030_000_000 && tb == 970_000_000, 50);
+    };
+    ts::end(sc);
+}
+
+#[test]
+#[expected_failure] // EExpiredUseClose: past expiry, close() is the only terminal path
+fun settle_after_expiry_aborts() {
+    let mut sc = ts::begin(OP);
+    let w = setup(&mut sc, 1_000_000_000, 1_000_000_000);
+    open_full(&mut sc, &w, 0, HOUR_MS, HOUR_MS); // expires at 1h
+    push(&mut sc, w.keeper, 2_100_000);
+    plain_settle(&mut sc, &w, HOUR_MS + 1); // one ms past expiry -> abort
+    ts::end(sc);
+}
+
+/// A settle-anytime (interval 0) contract carries NO periodic funding — there is
+/// no period to pro-rate — so repeated same-price settles move nothing (the old
+/// per-call funding leak is closed).
+#[test]
+fun interval_zero_charges_no_funding() {
+    let mut sc = ts::begin(OP);
+    let w = setup(&mut sc, 1_000_000_000, 1_000_000_000);
+    open_full(&mut sc, &w, 300, 0, 0); // funding 300 bps requested, but interval 0
+    // price flat at entry: VM 0, and funding must be 0 despite the 300 bps
+    plain_settle(&mut sc, &w, 0);
+    plain_settle(&mut sc, &w, 0);
+    plain_settle(&mut sc, &w, 0);
+    sc.next_tx(OP);
+    {
+        let (ta, tb) = totals(&sc, &w);
+        assert!(ta == 1_000_000_000 && tb == 1_000_000_000, 60); // nothing moved
     };
     ts::end(sc);
 }

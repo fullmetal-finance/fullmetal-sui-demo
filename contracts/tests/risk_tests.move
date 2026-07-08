@@ -346,3 +346,41 @@ fun collateral_params_set_and_read() {
     };
     sc.end();
 }
+
+#[test]
+fun vol_is_retunable_and_disablable() {
+    let mut sc = ts::begin(ADMIN);
+    setup_oracle(&mut sc, 1_000_000); // legacy jump latch off
+    sc.next_tx(ADMIN);
+    enable_default_vol(&mut sc); // seed σ 200bps, z* 4, ceil 800
+    sc.next_tx(ADMIN);
+    push_pct(&mut sc, 50, true); // one calm print, σ well-defined
+
+    // retune the shock latch down to z* = 2 in place
+    sc.next_tx(ADMIN);
+    {
+        let mut orc = ts::take_shared<RiskOracle>(&sc);
+        let admin = ts::take_from_sender<OracleAdminCap>(&sc);
+        oracle::retune_vol(&mut orc, &admin, spcx(), 9_400, 200, 800, 7_000, 3);
+        ts::return_to_sender(&sc, admin);
+        ts::return_shared(orc);
+    };
+    // +6% vs σ≈2% is z≈3: no latch under old z*=4, latches under the new z*=2
+    sc.next_tx(ADMIN);
+    push_pct(&mut sc, 600, true);
+    sc.next_tx(ADMIN);
+    assert_triggered(&sc, true);
+
+    // disable reverts the feed to legacy behaviour (vol state removed)
+    sc.next_tx(ADMIN);
+    {
+        let mut orc = ts::take_shared<RiskOracle>(&sc);
+        let admin = ts::take_from_sender<OracleAdminCap>(&sc);
+        oracle::clear_trigger(&mut orc, &admin, spcx());
+        oracle::disable_vol(&mut orc, &admin, spcx());
+        assert!(!oracle::has_vol(&orc, spcx()), 500);
+        ts::return_to_sender(&sc, admin);
+        ts::return_shared(orc);
+    };
+    sc.end();
+}

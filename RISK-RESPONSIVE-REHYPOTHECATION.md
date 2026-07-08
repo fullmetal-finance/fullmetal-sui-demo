@@ -331,7 +331,16 @@ rising significantly" — spend the buffer instantly in stress, rebuild it delib
 
 ---
 
-## 6. Parameters — one table, all admin-tunable
+## 6. Parameters
+
+Defaults are the *recommended* calibration below, not on-chain constants: the
+volatility parameters ($\lambda, z^{*}, \sigma^{ceil}, \theta_{rel}, N$) are supplied
+per feed to `oracle::enable_vol` and changed with `retune_vol` (OracleAdminCap-gated);
+the collateral/venue/floor parameters live in `rehypo_router::RehypoConfig` and are set
+with `set_collateral_params` / `set_venue_config` / `set_liquidity_floor`
+(AdminCap-gated). The AMBER/allocator parameters ($\theta_{warn}, \alpha_{max},
+\alpha_{rec}, \beta, \psi_{vw}$, drift band, redeposit ramp) are keeper-side and not yet
+on-chain.
 
 | Param | Default | Meaning | Anchor |
 |---|---|---|---|
@@ -352,10 +361,10 @@ rising significantly" — spend the buffer instantly in stress, rebuild it delib
 | drift band | 20% | GREEN rebalance deadband | — |
 | redeposit ramp | ⅓ per interval | post-RED re-entry speed limit | speed-limit tool ([BoE 597] §2.10); 2×-cap-growth analog ([Chaos cap methodology]) |
 
-On-chain today: `init_margin_bps`, `maint_margin_bps`, `recall_trigger_bps`, per-venue
-`enabled / cap / target_weight_bps` (`rehypo_router::set_collateral_params` /
-`set_venue_config`). The rest lands in the same `RehypoConfig` dynamic field — additive,
-no migration.
+On-chain today, all in the `RehypoConfig` dynamic field: `init_margin_bps`,
+`maint_margin_bps`, `recall_trigger_bps`, `stress_floor`, `phi_bps`, and per-venue
+`enabled / cap / target_weight_bps`; plus the per-feed EWMA calibration in `VolState`.
+The keeper-side AMBER/allocator parameters land later — additive, no migration.
 
 ---
 
@@ -370,24 +379,32 @@ trades, and liquidator behavior") and posts parameter recommendations
 p99 loss before recommending anything ([Chaos Aave methodology]). Neither asks the
 chain to simulate; both ask it to enforce.
 
-**On-chain (Move — enforce):**
-- EWMA update + both latches in `oracle.move` (§1 integer form; add `var_bps2` and
-  `release_count` to `Feed` — new fields on a `store` struct in a table are
-  upgrade-safe).
-- The floor $T \ge F$ as an assert inside `withdraw_for_rehypo` — deploys can never
-  breach the floor, whatever the keeper proposes.
+**On-chain (Move — enforce):** *(built — see `oracle.move`, `rehypo_router.move`)*
+- EWMA update + both latches in `oracle.move` (§1 integer form). The vol state
+  (`var_bps2`, calibration, `release_count`) lives in a **`VolState` dynamic field**
+  keyed per symbol, *not* as new fields on the published `Feed` struct — Sui forbids
+  adding fields to a live struct on upgrade, so the dynamic-field form is what makes
+  this additive. `enable_vol` arms it, `retune_vol` / `disable_vol` change or remove
+  it, `push_price_v2` advances it.
+- The floor $T \ge F$ as an assert inside `withdraw_for_rehypo` (and the DeepBook
+  `rehypo::rehypothecate` path) — a *deploy* can never leave liquid treasury below the
+  floor, whatever the keeper proposes. (The floor guards deployment; admin
+  `withdraw_treasury` is separately bounded by economic `available`.)
 - $P_v \le \alpha_{max} A_v$ checked in each venue adapter at supply time (the adapter
-  reads its own pool's $A_v$ in the same transaction).
+  reads its own pool's $A_v$ in the same transaction) — *spec for the typed adapters;
+  the router enforces per-venue `cap` today*.
 - `recall_on_trigger` stays permissionless — the RED action must need no one's key.
 
 **Off-chain (keeper/frontend — propose):**
 - Venue adapter polling ($A_v$, $U_v$, kink, APR — extends `/api/rates`).
 - Allocation optimization (§3) → emits `rehypothecate`/`recall` PTBs the chain
   re-checks.
-- $O_{stress}$ estimation (needs history; the chain stores only the current floor $F$).
+- $O_{stress}$ estimation (needs history). The keeper computes it off-chain and an
+  admin commits it via `set_liquidity_floor` (AdminCap-gated — a keeper runs under a
+  delegated admin key); the chain stores only the resulting floor $F$ and enforces it.
 
-An adversarial keeper can therefore propose a *suboptimal* allocation, never an
-*unsafe* one.
+An adversarial keeper can therefore propose a *suboptimal* allocation or floor, never an
+*unsafe* deploy — the on-chain `T ≥ F` assert is the backstop.
 
 ## 8. Implementation status
 
@@ -395,11 +412,12 @@ An adversarial keeper can therefore propose a *suboptimal* allocation, never an
    latches, deadband release with counter reset; the demo is unchanged (a 15% SPCX
    print latches instantly at $z \gg 4$). Tested with hand-computed variance traces
    (`risk_tests.move`), including the emergent bigger-shock-longer-cooldown property.
-2. ✅ **Floor assert in `withdraw_for_rehypo`** — `stress_floor` + `phi_bps` in
-   `RehypoConfig`, `required_floor`/`deployable` views, `set_liquidity_floor` keeper
-   push. The chain enforces $T \ge F$; the keeper only proposes.
-3. ✅ **Adapter reads** — `/api/rates` serves $A_v$, $U_v$, and the kink per venue
-   (`risk` block). ⏳ Keeper allocation loop (§3 scoring) still to build.
+2. ✅ **Floor assert in `withdraw_for_rehypo`** *and the DeepBook `rehypo` path* —
+   `stress_floor` + `phi_bps` in `RehypoConfig`, `required_floor`/`deployable` views,
+   `set_liquidity_floor` (AdminCap-gated). The chain enforces $T \ge F$ on every deploy.
+3. ✅ **Adapter reads** — `/api/rates` serves $A_v$ and $U_v$ for all three venues, and
+   the rate-model kink for DeepBook + Suilend (Navi's kink is not exposed by its API, so
+   that field is null). ⏳ Keeper allocation loop (§3 scoring) still to build.
 4. ⏳ **AMBER partial-recall path** — on-chain `recall` already takes an amount;
    the §5 sizing rule lands with the keeper.
 5. Later: multi-underlying $\sigma_p$ netting, fractional-Kelly / mean-variance

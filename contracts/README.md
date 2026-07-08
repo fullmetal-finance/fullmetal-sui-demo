@@ -26,7 +26,7 @@ what's here, how to build and test it, and the toolchain quirks you will hit.
 
 ```bash
 sui move build        # needs Sui CLI ≥ 1.74 (see toolchain notes)
-sui move test         # 36 tests
+sui move test         # 40 tests
 ```
 
 Test files map to feature areas: `lifecycle_tests` (institution/treasury/margin
@@ -66,6 +66,6 @@ tickets).
 All aborts use `errors.move` getters — globally unique, grouped by area
 (auth 0–9, governance 10–19, treasury 20–29 incl. `EBelowLiquidityFloor` 24,
 traders 30–39, registry 40–49, OTC seams 50–59, oracle 60–69, forward 70–89
-incl. `ECureWindowActive` 77, rfq 90–109 incl. `ECrossedQuote` 105 /
-`EAlreadyQuoted` 106 / `EOverBucket` 107, direct 110–119). A failed tx's code
-names the failure precisely.
+incl. `ECureWindowActive` 77 / `EExpiredUseClose` 78, rfq 90–109 incl.
+`ECrossedQuote` 105 / `EAlreadyQuoted` 106 / `EOverBucket` 107, direct
+110–119). A failed tx's code names the failure precisely.

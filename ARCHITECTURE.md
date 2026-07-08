@@ -6,7 +6,7 @@
 > fires. USDC-settled (DBUSDC on testnet, 6 decimals).
 >
 > **This is a living document.** Update it whenever the contract architecture
-> changes. Last updated: 2026-06-16.
+> changes. Last updated: 2026-07-08.
 
 ---
 
@@ -39,7 +39,7 @@ The package is `fullmetal` (Move 2024, framework + OZ math + `deepbook_margin`).
 | `otc_forward` | product | Bilateral forward contract object; MTM, funding, liquidation; the `open_from_rfq` + `RfqWitness` seam | OZ `fp_math`, `math` |
 | `rfq` | product | Request-for-quote: firm collateral-backed quotes → atomic single-signer accept | — |
 | `direct` | product | Direct bilateral offer ("type the counterparty's org ID"): proposer fixes all terms + commits collateral first → named desk accepts. Mirror of `rfq`, reuses `open_from_rfq`/`RfqWitness` | — |
-| `rfq_twoway` | product | Information-disciplined RFQ ([WHITEPAPER §5.1](WHITEPAPER.md) Phase A): no direction on the request, bid+ask two-way quotes, single-shot per maker, size-bucket ceilings, id-only events. Reuses `RfqWitness`/`open_from_rfq`; supersedes `rfq` at frontend cutover | — |
+| `rfq_twoway` | product | Information-disciplined RFQ ([WHITEPAPER §5.1](WHITEPAPER.md) Phase A): no direction on the request, bid+ask two-way quotes, single-shot per maker, size-bucket ceilings, lean events (ids + expiries; open also carries the underlying — no prices, sides, sizes, or counterparty identities). Reuses `RfqWitness`/`open_from_rfq`; supersedes `rfq` at frontend cutover | — |
 | `rehypo_router` | core | Venue-agnostic rehypothecation: admin-tunable `RehypoConfig` (margin bps, liquidity floor, per-venue enable/cap/weight), per-venue receipt + principal dynamic-field slots, hot-potato supply/recall tickets for **external** venue adapter packages (Suilend / Navi) | — |
 
 ```
@@ -443,7 +443,8 @@ submit_two_way_quote    maker posts BID and ASK (crossed markets abort); ONE sho
                         per RFQ — withdrawing frees the IM bond but never restores the shot
 accept_two_way          requester picks the side (take_ask) + exact notional (≤ ceiling)
                         — direction exists nowhere on-chain before this call
-events                  object ids + expiries only: no identities, prices, sides, or sizes
+events                  ids + expiries (+ underlying & a targeted flag on open); NO
+                        prices, sides, sizes, or counterparty identities
 ```
 
 One IM reservation backs the two-way quote because only one side can ever
@@ -476,8 +477,8 @@ the frontend cutover retires it.
 
 - **OZ libraries (git, audited v1.2.0):** `openzeppelin_math` (`u128::mul_div`,
   `rounding`, `decimal_scaling`) and `openzeppelin_fp_math` (`SD29x9` signed,
-  `UD30x9` unsigned, 9-decimal scale). MVR is unavailable on Sui CLI 1.72.1, so
-  the git form is used.
+  `UD30x9` unsigned, 9-decimal scale). The OZ deps use the git form (pinned to the
+  audited v1.2.0 tag); `deepbook_margin` resolves via MVR (see §13).
 - **Decimal bridge:** `fp_math` is hardwired to 9 decimals; DBUSDC is 6. Lift a
   1e6-scaled int into the 9dp domain with `ud30x9::wrap(x · 1000)`; for a
   non-negative `SD29x9`, `unwrap(abs(pnl)) / 1000` gives the 6dp magnitude.
@@ -502,7 +503,7 @@ the frontend cutover retires it.
 
 ## 13. Deployment — LIVE on testnet
 
-The package **builds, unit-tests pass** (36 tests; see
+The package **builds, unit-tests pass** (40 tests; see
 [contracts/README.md](contracts/README.md) for the toolchain notes), and is
 **deployed to testnet**, with the full rehypothecation loop, the RFQ path, and
 the direct-offer path all proven on-chain with real DBUSDC.

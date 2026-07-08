@@ -27,6 +27,21 @@ public struct SettlementTicket<phantom C> {
 /// Debit `amount` of the payer's free funds. Witness-gated (same allowlist as
 /// margin); no AdminCap. To pay VM out of reserved IM, the OTC layer composes
 /// `institution::release_margin` then `begin_settlement` in one PTB.
+///
+/// NOT pause-gated, deliberately: settlement here only honors an EXISTING,
+/// witness-authorized contract obligation (VM/funding/close-out to a bound
+/// counterparty). Pause is the payer-admin's own switch; letting it block
+/// settlement would let a losing desk self-pause to repudiate its mark-to-market
+/// losses and wait for mean-reversion (a confirmed look-back griefing attack).
+/// Pause still stops the payer's DISCRETIONARY outflows — `withdraw_treasury`
+/// and new-contract `reserve_margin` both check `assert_not_paused`.
+///
+/// The caller must ensure `amount` is physically coverable — `available` counts
+/// rehypothecated funds (equity = liquid + deployed) but `balance::split` moves
+/// only the physical liquid balance, so a caller that has not recalled deployed
+/// funds must gate on `institution::total` (physical) too. The OTC layer does
+/// (see `otc_forward::settle_at_mark`), routing a physical shortfall through the
+/// margin-call / recall path instead of aborting here.
 #[allow(deprecated_usage)]
 public fun begin_settlement<C, W: drop>(
     payer: &mut Institution<C>,
@@ -36,7 +51,6 @@ public fun begin_settlement<C, W: drop>(
     otc_id: ID,
     amount: u64,
 ): SettlementTicket<C> {
-    institution::assert_not_paused(payer);
     let wname = type_name::get_with_original_ids<W>().into_string();
     assert!(protocol::is_witness_allowed(allow, &wname), errors::e_witness_not_allowed());
     assert!(amount <= institution::available(payer), errors::e_insufficient_treasury());
