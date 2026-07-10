@@ -31,8 +31,10 @@ const PRICE_UNIT: u64 = 1_000_000; // 1e6 scale for prices and quantities
 const MAINTENANCE_BPS: u64 = 7_000; // maintenance margin = 70% of IM
 /// Margin-call cure window: an insolvent MM breach must persist this long —
 /// uncured by deposit, venue recall, or mean-reversion — before it may be
-/// liquidated (anti wick-picking; see `settle_on_breach`).
-const CURE_WINDOW_MS: u64 = 600_000; // 10 minutes
+/// liquidated (anti wick-picking; see `settle_on_breach`). Production target
+/// is ~10 minutes; set to 90s for the demo so a live margin-call → cure /
+/// liquidation drill fits on stage (internal constant, not part of the ABI).
+const CURE_WINDOW_MS: u64 = 90_000; // 90 seconds (demo calibration)
 const U64_MAX: u128 = 18_446_744_073_709_551_615;
 
 const STATUS_ACTIVE: u8 = 0;

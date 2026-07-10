@@ -236,8 +236,8 @@ export default function CreateOtcModal({
               <Labeled label="Rehypothecate idle margin to" hint="live USDC supply APR">
                 <div className="flex flex-col gap-2.5">
                   <Check checked={rehypo} onChange={setRehypo} label="DeepBook margin" logo="/logos/deepbook.png" apr={rates?.rates.deepbook} />
-                  <Check checked={false} disabled label="Suilend" hint="integrated later" logo="/logos/suilend.png" apr={rates?.rates.suilend} />
-                  <Check checked={false} disabled label="Navi" hint="integrated later" logo="/logos/navi.png" apr={rates?.rates.navi} />
+                  <Check checked={false} disabled label="Suilend" hint="allocate from the Collateral manager" logo="/logos/suilend.png" apr={rates?.rates.suilend} />
+                  <Check checked={false} disabled label="Navi" hint="allocate from the Collateral manager" logo="/logos/navi.png" apr={rates?.rates.navi} />
                 </div>
               </Labeled>
             </Section>

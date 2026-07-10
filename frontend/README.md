@@ -90,10 +90,16 @@ lib/
    entity, handle). One sponsored transaction shares the `Institution` object.
 2. **Load funds** — the mock on-ramp faucets DBUSDC and deposits it to the treasury.
 3. **New OTC contract** — direct (type a counterparty handle) or RFQ (broadcast; three
-   desks quote, accept the best). Posted IM auto-rehypothecates to DeepBook.
-4. **Collateral manager** — push an SPCX mark. A move past the ±15% oracle threshold
-   latches the trigger and recalls collateral from DeepBook; three in-band prints later,
-   volatility is deemed subsided and the margin auto-redeposits.
+   desks quote, accept the best). Posted IM auto-rehypothecates to DeepBook. The
+   **cross-margin panel** shows the trade's IM fenced inside the one pooled treasury.
+4. **Collateral manager** — allocate across DeepBook (real testnet txs) and
+   Suilend/Navi (SIM-badged, live mainnet APRs), above the on-chain liquidity floor.
+   Then **Run scenario** (e.g. Flash crash): every print is a real on-chain
+   `push_price_v2`; the EWMA σ latch fires → breached positions take **margin calls**
+   (90 s cure window) → the **permissionless recall** brings collateral home and the
+   positions pay & survive → three calm prints later the latch **auto-releases
+   on-chain** and the margin redeposits. The chart marks the recall and redeposit
+   ticks with their tx links. See [DEMO.md](../DEMO.md) for the full runbook.
 
 The protocol architecture (object model, accounting, capability auth, lifecycle flows)
 is in [ARCHITECTURE.md](https://github.com/fullmetal-finance/fullmetal-sui-demo/blob/main/ARCHITECTURE.md).

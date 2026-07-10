@@ -12,7 +12,7 @@ what's here, how to build and test it, and the toolchain quirks you will hit.
 | Module | What it owns |
 |---|---|
 | `institution` | the tenant: one shared pooled treasury, IM fences (`reserved`), traders/admins/caps, the `public(package)` seams everything else uses |
-| `otc_forward` | the contract: SD29x9 PnL, pro-rata funding, cadence settlement, **`settle_on_breach`** (permissionless MM crank + 10-min margin-call cure window), liquidation |
+| `otc_forward` | the contract: SD29x9 PnL, pro-rata funding, cadence settlement, **`settle_on_breach`** (permissionless MM crank + margin-call cure window — 90 s demo calibration, production ~10 min), liquidation |
 | `settlement` | hot-potato atomic value transfer between institutions |
 | `rfq` / `direct` | firm collateral-backed quotes / named-counterparty offers (deployed demo paths) |
 | `rfq_twoway` | information-disciplined RFQ: no direction, bid+ask quotes, single-shot per maker, bucket ceilings (WHITEPAPER §5.1 Phase A) |

@@ -508,12 +508,13 @@ The package **builds, unit-tests pass** (40 tests; see
 **deployed to testnet**, with the full rehypothecation loop, the RFQ path, and
 the direct-offer path all proven on-chain with real DBUSDC.
 
-> **Deployed vs. built:** the modules added since the last publish —
-> `rehypo_router`, `rfq_twoway`, the oracle EWMA layer, and the
-> `settle_on_breach` crank — are in-repo, compiled, and fully unit-tested but
-> **not yet on testnet**; they ship with the next package upgrade (all changes
-> are upgrade-compatible: additive modules/functions/structs only, frozen
-> signatures untouched).
+> **Deployed vs. built:** as of the `0xf8b57f…` upgrade (2026-07-10), the
+> whole suite is live on testnet — `rehypo_router`, `rfq_twoway`, the oracle
+> EWMA layer (`enable_vol`/`push_price_v2`, armed on SPCX), and the
+> `settle_on_breach` crank. All changes were upgrade-compatible (additive
+> modules/functions/structs, frozen signatures untouched). Note: the
+> margin-call cure window is set to **90 s** for the demo (internal constant;
+> production target ~10 min).
 
 **How the dependency-publish hurdle was solved — MVR.** Publishing links against
 the deployed DeepBook on testnet; the deepbookv3 source revs ship no publish
@@ -528,7 +529,8 @@ does not), so the version is pinned. OZ math stays a git dep (it ships
 
 | Object | ID |
 |---|---|
-| Package (current) | `0x53ed96a991241db1e20c964930f1e9981c2db438f74dc17867f9705bd8b392b0` (upgrade w/ rehypo recall-rounding fix) |
+| Package (current) | `0xf8b57f09dfe5e59fcc176110c8f15cf96b27f6f23be8a4db959529d896635a4a` (upgrade: EWMA vol oracle, rehypo router, `settle_on_breach`, two-way RFQ; demo 90s cure window) |
+| Package (prev — recall-rounding fix) | `0x53ed96a991241db1e20c964930f1e9981c2db438f74dc17867f9705bd8b392b0` |
 | Package (prev — direct offer) | `0xbbf751ec720828c7ca39efefcd246c43c86e46ae310218a420c00aaf27b5b7fa` |
 | Package (prev — RFQ) | `0x7106aeb00de8f07c4f5c28e1fc7b13b03e42e474e6221db81e81b09ca80b561e` |
 | Package (original-id) | `0x3dfbfa5254f00a0b501ebfdf449f044340e09f0629b37dfa7d834130157dfddf` |

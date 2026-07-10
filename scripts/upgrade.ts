@@ -10,7 +10,9 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from '@mysten/sui/jsonRpc';
+import { SuiJsonRpcClient } from '@mysten/sui/jsonRpc';
+
+import { TESTNET_JSONRPC_URL } from './rpc';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
 
@@ -34,7 +36,7 @@ function keypair(): Ed25519Keypair {
 async function main() {
   const { modules, dependencies, digest } = JSON.parse(readFileSync('/tmp/dump.json', 'utf8'));
   const kp = keypair();
-  const client = new SuiJsonRpcClient({ url: getJsonRpcFullnodeUrl('testnet') });
+  const client = new SuiJsonRpcClient({ url: TESTNET_JSONRPC_URL });
 
   // The upgrade command must reference the CURRENT package the UpgradeCap points
   // at (it advances on every commit), so read it live rather than hardcoding.

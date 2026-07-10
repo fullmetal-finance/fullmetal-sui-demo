@@ -25,7 +25,7 @@ const OP: address = @0x0B;
 const SUI: vector<u8> = b"SUI";
 const IM: u64 = 200_000_000; // $200 → MM $140, buffer $60
 const HOUR_MS: u64 = 3_600_000;
-const CURE_MS: u64 = 600_000; // must match otc_forward::CURE_WINDOW_MS
+const CURE_MS: u64 = 90_000; // must match otc_forward::CURE_WINDOW_MS
 
 public struct World has drop {
     a_inst: ID, // long

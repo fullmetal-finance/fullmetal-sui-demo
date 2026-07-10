@@ -80,6 +80,6 @@ export function useAcceptQuote() {
       }
       return { digest, otcId };
     },
-    [account, sponsoredExecute],
+    [account, sponsoredExecute, rehypothecate],
   );
 }

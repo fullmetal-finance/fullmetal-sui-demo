@@ -2,11 +2,12 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
+import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { Transaction, coinWithBalance } from "@mysten/sui/transactions";
 
 import { CLOCK, DBUSDC_TYPE, PACKAGE, SHARED } from "@/lib/fullmetal";
+import { serverSuiClient } from "@/lib/server-sui";
 
 export const runtime = "nodejs";
 
@@ -60,7 +61,7 @@ export async function POST(request: Request) {
     const { rfqId } = await request.json();
     if (typeof rfqId !== "string") return Response.json({ error: "missing rfqId" }, { status: 400 });
 
-    const c = new SuiJsonRpcClient({ network: "testnet", url: getJsonRpcFullnodeUrl("testnet") });
+    const c = serverSuiClient();
     const kp = keypair();
 
     const rfq = await c.getObject({ id: rfqId, options: { showContent: true } });

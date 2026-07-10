@@ -98,9 +98,88 @@ export async function readUserContracts(
       maturity: tenorLabel(Number(f.expiry_ms ?? "0")),
       venue: "DeepBook",
       otcId: o.data!.objectId,
+      status: Number(f.status ?? "0"),
     });
   }
   return rows;
+}
+
+/** Per-contract cross-margin health for the margin panel: live status, whether
+ *  the MM buffer is breached at the current oracle mark, and a pending
+ *  margin-call deadline (ms) if one is recorded. */
+export type ContractHealth = {
+  otcId: string;
+  status: number; // 0 active · 1 settled · 2 liquidated
+  breached: boolean;
+  callDeadlineMs: number | null;
+};
+
+export async function readContractsHealth(otcIds: string[]): Promise<ContractHealth[]> {
+  if (!otcIds.length) return [];
+  const tx = new Transaction();
+  for (const id of otcIds) {
+    tx.moveCall({
+      target: TARGET.otc.mmBreached,
+      typeArguments: [DBUSDC_TYPE],
+      arguments: [tx.object(id), tx.object(SHARED.riskOracle), tx.object(CLOCK)],
+    });
+    tx.moveCall({
+      target: TARGET.otc.marginCallDeadline,
+      typeArguments: [DBUSDC_TYPE],
+      arguments: [tx.object(id)],
+    });
+  }
+  const [r, objs] = await Promise.all([
+    suiRead.devInspectTransactionBlock({ sender: READER, transactionBlock: tx }),
+    suiRead.multiGetObjects({ ids: otcIds, options: { showContent: true } }),
+  ]);
+  return otcIds.map((otcId, i) => {
+    const breached = (r.results?.[2 * i]?.returnValues?.[0]?.[0] as number[] | undefined)?.[0] === 1;
+    // Option<u64> BCS: [0] = none · [1, 8 bytes LE] = some(deadline)
+    const ob = (r.results?.[2 * i + 1]?.returnValues?.[0]?.[0] ?? []) as number[];
+    const callDeadlineMs = ob[0] === 1 ? Number(decodeU64(ob.slice(1, 9))) : null;
+    const f = (objs[i]?.data?.content as { fields?: Record<string, string> } | undefined)?.fields;
+    return { otcId, status: Number(f?.status ?? "0"), breached, callDeadlineMs };
+  });
+}
+
+/** Resolve proposed direct offers that the counterparty has since accepted:
+ *  returns (offerId → the opened OtcForward id) for every accepted offer. */
+export async function readAcceptedOffers(offerIds: string[]): Promise<{ offerId: string; otcId: string }[]> {
+  if (!offerIds.length) return [];
+  const objs = await suiRead.multiGetObjects({ ids: offerIds, options: { showContent: true } });
+  const out: { offerId: string; otcId: string }[] = [];
+  for (const o of objs) {
+    const f = (o.data?.content as { fields?: Record<string, unknown> } | undefined)?.fields;
+    if (!f) continue;
+    // Option<ID> renders as null (none) or the id string / {Some: id}
+    const raw = f.accepted_otc as string | { Some?: string } | null | undefined;
+    const otcId = typeof raw === "string" ? raw : raw?.Some;
+    if (otcId) out.push({ offerId: o.data!.objectId, otcId });
+  }
+  return out;
+}
+
+/** On-chain liquidity floor (router policy): liquid treasury may never be
+ *  deployed below `floor`; `deployable` = liquid − floor. Defaults apply if
+ *  the institution never customised its RehypoConfig. */
+export async function readFloor(instId: string): Promise<{ floor: number; deployable: number }> {
+  const tx = new Transaction();
+  tx.moveCall({
+    target: TARGET.router.requiredFloor,
+    typeArguments: [DBUSDC_TYPE],
+    arguments: [tx.object(instId)],
+  });
+  tx.moveCall({
+    target: TARGET.router.deployable,
+    typeArguments: [DBUSDC_TYPE],
+    arguments: [tx.object(instId)],
+  });
+  const r = await suiRead.devInspectTransactionBlock({ sender: READER, transactionBlock: tx });
+  return {
+    floor: Number(decodeU64(r.results?.[0]?.returnValues?.[0]?.[0] as number[] | undefined)) / 1e6,
+    deployable: Number(decodeU64(r.results?.[1]?.returnValues?.[0]?.[0] as number[] | undefined)) / 1e6,
+  };
 }
 
 export type OracleState = { mark: number; triggered: boolean };

@@ -2,7 +2,24 @@
 
 import { SPCX } from "./fullmetal";
 
-export type OracleResult = { mark: number; triggered: boolean; digest?: string; recalled?: boolean; recallDigest?: string; error?: string };
+export type CrankOutcome = { otcId: string; deadline: number | null; status: number };
+
+/** Shape returned by every /api/oracle action (tick adds the recall fields). */
+export type OracleResult = {
+  mark: number;
+  triggered: boolean;
+  sigmaBps: number;
+  releaseProgress: number;
+  rehypothecated: number;
+  digest?: string;
+  pushDigest?: string;
+  recalled?: boolean;
+  recalledAmount?: number;
+  recallDigest?: string;
+  marginCalls?: CrankOutcome[]; // tick with drill contracts armed
+  cured?: CrankOutcome[]; // cure action
+  error?: string;
+};
 
 async function postOracle(body: Record<string, unknown>): Promise<OracleResult> {
   const res = await fetch("/api/oracle", {
@@ -15,6 +32,22 @@ async function postOracle(body: Record<string, unknown>): Promise<OracleResult> 
   return data as OracleResult;
 }
 
+/** One scenario tick: keeper pushes `price` through the EWMA layer. On a
+ *  latch: with `otcIds` armed, the server cranks the breached contracts first
+ *  (→ margin calls while liquidity is out); otherwise it fires the
+ *  permissionless recall immediately. */
+export const pushTick = (instId: string, price: number, otcIds?: string[]) =>
+  postOracle({ action: "tick", instId, price, otcIds });
+
+/** The cure: permissionless recall + re-crank the called contracts (they pay
+ *  from the recalled liquidity and survive). */
+export const cureCalls = (instId: string, otcIds: string[]) =>
+  postOracle({ action: "cure", instId, otcIds });
+
+/** Manual breach crank of one contract (margin call / pay / liquidate). */
+export const crankContract = (otcId: string) =>
+  postOracle({ action: "crank", otcIds: [otcId] });
+
 /** Push the SPCX spike (latches the trigger). Keeper-signed, server-side. */
 export const triggerSpike = (price: number = SPCX.spikeMark) => postOracle({ action: "push", price });
 
@@ -26,10 +59,10 @@ export const triggerAndRecall = (instId: string, price: number = SPCX.spikeMark)
 /** Clear the trigger ("volatility subsides"). */
 export const calmOracle = () => postOracle({ action: "clear" });
 
-/** Reset SPCX to the nominal mark, untriggered — so the next spike latches. */
+/** Reset SPCX to the nominal mark, untriggered, EWMA re-seeded — clean stage. */
 export const resetOracle = () => postOracle({ action: "reset" });
 
-/** Ease SPCX back toward a nominal mark (no trigger). */
+/** Push a mark without the recall sequence (manual mode). */
 export const setMark = (price: number) => postOracle({ action: "push", price });
 
-export const oracleStatus = () => postOracle({ action: "status" });
+export const oracleStatus = (instId?: string) => postOracle({ action: "status", instId });

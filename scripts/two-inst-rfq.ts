@@ -11,7 +11,9 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from '@mysten/sui/jsonRpc';
+import { SuiJsonRpcClient } from '@mysten/sui/jsonRpc';
+
+import { TESTNET_JSONRPC_URL } from './rpc';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction, coinWithBalance } from '@mysten/sui/transactions';
 
@@ -40,7 +42,7 @@ function keypair(): Ed25519Keypair {
 
 const kp = keypair();
 const me = kp.toSuiAddress();
-const client = new SuiJsonRpcClient({ url: getJsonRpcFullnodeUrl('testnet') });
+const client = new SuiJsonRpcClient({ url: TESTNET_JSONRPC_URL });
 
 async function run(label: string, build: (tx: Transaction) => void) {
   const tx = new Transaction();

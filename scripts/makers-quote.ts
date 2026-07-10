@@ -11,7 +11,9 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from '@mysten/sui/jsonRpc';
+import { SuiJsonRpcClient } from '@mysten/sui/jsonRpc';
+
+import { TESTNET_JSONRPC_URL } from './rpc';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction, coinWithBalance } from '@mysten/sui/transactions';
 
@@ -62,7 +64,7 @@ async function main() {
   const rfqId = process.argv[2];
   if (!rfqId) throw new Error('usage: makers-quote.ts <rfqId>');
   const kp = keypair();
-  const c = new SuiJsonRpcClient({ network: 'testnet', url: getJsonRpcFullnodeUrl('testnet') });
+  const c = new SuiJsonRpcClient({ network: 'testnet', url: TESTNET_JSONRPC_URL });
 
   // read RFQ im_each + expiry
   const rfq = await c.getObject({ id: rfqId, options: { showContent: true } });

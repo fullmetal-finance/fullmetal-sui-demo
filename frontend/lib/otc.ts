@@ -102,6 +102,17 @@ export function useCreateOtc() {
           });
         });
         const offerId = await createdOf(digest, "::direct::DirectOffer<");
+        // track the offer so the dashboard can pick up the OtcForward once the
+        // named counterparty accepts (accepted_otc lands on the offer object)
+        {
+          const cur = loadInstitution(account.address);
+          if (cur) {
+            saveInstitution(account.address, {
+              ...cur,
+              directOfferIds: [...(cur.directOfferIds ?? []), offerId],
+            });
+          }
+        }
         // default behaviour: the posted IM is rehypothecated to DeepBook on open
         if (d.rehypo && d.im > 0) {
           try {
@@ -143,7 +154,7 @@ export function useCreateOtc() {
       if (cur) saveInstitution(account.address, { ...cur, rfqIds: [...(cur.rfqIds ?? []), offerId] });
       return { digest, offerId, kind: "rfq" };
     },
-    [account, sponsoredExecute],
+    [account, sponsoredExecute, rehypothecate],
   );
 }
 

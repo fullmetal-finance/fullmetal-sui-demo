@@ -8,6 +8,7 @@ import Logo from "../components/Logo";
 import SignInWithGoogle from "../components/SignInWithGoogle";
 import CreateOtcModal from "../components/CreateOtcModal";
 import LoadUsdModal from "../components/LoadUsdModal";
+import MarginPanel from "../components/MarginPanel";
 import RehypoHero from "../components/RehypoHero";
 import Blotter from "../components/Blotter";
 import TradersPanel from "../components/TradersPanel";
@@ -16,7 +17,7 @@ import MarketRfqs from "../components/MarketRfqs";
 import RatesBar from "../components/RatesBar";
 import { DBUSDC_TYPE, TARGET, explorer, usd } from "@/lib/fullmetal";
 import { loadInstitution, saveInstitution, saveQuotes, type InstitutionRecord } from "@/lib/store";
-import { readInstitution, readUserContracts, type InstState } from "@/lib/institution-state";
+import { readAcceptedOffers, readInstitution, readUserContracts, type InstState } from "@/lib/institution-state";
 import { useSponsoredExecute } from "@/lib/sponsored";
 import type { OtcResult } from "@/lib/otc";
 import { MOCK_INCOMING_RFQS, MOCK_POSITIONS, positionPnl, type MockPosition } from "@/lib/mock";
@@ -77,11 +78,34 @@ export default function Dashboard() {
     return () => clearInterval(t);
   }, [rec, refresh]);
 
-  // record the desk's real on-chain contracts in the blotter
+  // record the desk's real on-chain contracts in the blotter; re-read alongside
+  // the 4s state poll so marks/status stay live during the scenario
   useEffect(() => {
     if (!rec?.otcIds?.length) return;
     readUserContracts(rec.otcIds, rec.institutionId, rec.profile.adminName).then(setPositions).catch(() => {});
-  }, [rec]);
+  }, [rec, state]);
+
+  // proposed direct offers: once the counterparty accepts, fold the opened
+  // OtcForward into the blotter and stop tracking the offer
+  useEffect(() => {
+    if (!account || !rec?.directOfferIds?.length) return;
+    readAcceptedOffers(rec.directOfferIds)
+      .then((accepted) => {
+        if (!accepted.length) return;
+        const cur = loadInstitution(account.address);
+        if (!cur) return;
+        const acceptedOffers = new Set(accepted.map((a) => a.offerId));
+        const newOtcIds = accepted.map((a) => a.otcId).filter((id) => !(cur.otcIds ?? []).includes(id));
+        const next = {
+          ...cur,
+          otcIds: [...(cur.otcIds ?? []), ...newOtcIds],
+          directOfferIds: (cur.directOfferIds ?? []).filter((id) => !acceptedOffers.has(id)),
+        };
+        saveInstitution(account.address, next);
+        setRec(next);
+      })
+      .catch(() => {});
+  }, [account, rec, state]);
 
   const reload = useCallback(() => {
     if (account) {
@@ -218,12 +242,18 @@ export default function Dashboard() {
               >
                 {tab === "positions" && (
                   <div className="space-y-6">
+                    <MarginPanel state={state} positions={positions} onRefresh={() => sync(rec.institutionId)} />
                     <Blotter real={positions} />
                     <TradersPanel />
                   </div>
                 )}
                 {tab === "engine" && (
-                  <RehypoHero instId={rec.institutionId} state={state} onRefresh={() => sync(rec.institutionId)} />
+                  <RehypoHero
+                    instId={rec.institutionId}
+                    state={state}
+                    otcIds={(rec.otcIds ?? []).filter((id) => positions.find((p) => p.otcId === id && (p.status ?? 0) === 0))}
+                    onRefresh={() => sync(rec.institutionId)}
+                  />
                 )}
                 {tab === "rfq" && (
                   <div className="space-y-6">

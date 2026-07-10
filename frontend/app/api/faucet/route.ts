@@ -2,11 +2,11 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { Transaction, coinWithBalance } from "@mysten/sui/transactions";
 
 import { DBUSDC_TYPE } from "@/lib/fullmetal";
+import { serverSuiClient } from "@/lib/server-sui";
 
 export const runtime = "nodejs";
 
@@ -42,7 +42,7 @@ export async function POST(request: Request) {
     const units = BigInt(Math.round(amt * 1e6));
 
     const kp = faucetKeypair();
-    const client = new SuiJsonRpcClient({ network: "testnet", url: getJsonRpcFullnodeUrl("testnet") });
+    const client = serverSuiClient();
 
     const tx = new Transaction();
     tx.transferObjects([coinWithBalance({ type: DBUSDC_TYPE, balance: units })], to);

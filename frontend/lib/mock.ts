@@ -29,6 +29,7 @@ export type MockPosition = {
   maturity: string;
   venue: string; // rehypothecation venue
   otcId?: string; // real (on-chain) rows carry the OtcForward id
+  status?: number; // real rows: 0 active · 1 settled · 2 liquidated
 };
 
 export const MOCK_POSITIONS: MockPosition[] = [

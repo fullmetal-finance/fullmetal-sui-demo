@@ -24,6 +24,7 @@ export type InstitutionRecord = {
   createdAt: number;
   rfqIds?: string[]; // open RFQs this desk has broadcast
   otcIds?: string[]; // opened OtcForward contracts
+  directOfferIds?: string[]; // direct offers proposed, awaiting counterparty accept
 };
 
 const key = (addr: string) => `fullmetal:institution:${addr.toLowerCase()}`;
