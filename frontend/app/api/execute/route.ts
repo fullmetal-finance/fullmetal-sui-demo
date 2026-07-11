@@ -18,6 +18,10 @@ export async function POST(request: Request) {
     const res = await enoki.executeSponsoredTransaction({ digest, signature });
     return Response.json({ digest: res.digest });
   } catch (e) {
-    return Response.json(enokiErrorDetail(e), { status: 502 });
+    const detail = enokiErrorDetail(e);
+    // 4xx from Enoki (e.g. "Sponsored transaction not found" after a hung
+    // execute consumed the sponsorship) is not an infra 502 — pass it as 400.
+    const status = detail.enokiStatus && detail.enokiStatus < 500 ? 400 : 502;
+    return Response.json(detail, { status });
   }
 }

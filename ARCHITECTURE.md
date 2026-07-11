@@ -6,7 +6,7 @@
 > fires. USDC-settled (DBUSDC on testnet, 6 decimals).
 >
 > **This is a living document.** Update it whenever the contract architecture
-> changes. Last updated: 2026-07-08.
+> changes. Last updated: 2026-07-11.
 
 ---
 
@@ -318,7 +318,7 @@ flowchart TD
     S -->|loser cannot cover| L[liquidate: release both IMs, pay winner capped, status=LIQUIDATED]
     O --> B{settle_on_breach — permissionless, anytime unrealized net > 0.3·IM}
     B -->|pool covers| V
-    B -->|insolvent, first crank| M[margin call recorded, 10-min cure window] --> B
+    B -->|insolvent, first crank| M["margin call recorded — cure window 90s demo, ~10min prod"] --> B
     B -->|insolvent past window| L
     O --> C[close at expiry: final MTM, release IMs, status=SETTLED]
 
@@ -336,8 +336,9 @@ flowchart TD
 The **maintenance-breach crank** (`settle_on_breach`) is what makes
 cross-margining real: a breached-but-solvent position is cured by the pooled
 treasury with zero margin-call latency and survives; an insolvent breach must
-persist through an on-chain margin call (`MarginCalled`, `CURE_WINDOW_MS` =
-10 min) before it may liquidate — a one-print wick that mean-reverts cannot
+persist through an on-chain margin call (`MarginCalled`, `CURE_WINDOW_MS` —
+production target ~10 min; **90 s in the deployed demo build**, see §13)
+before it may liquidate — a one-print wick that mean-reverts cannot
 kill a position (anti wick-picking, confirmed and fixed in adversarial
 review). Funding accrues **pro-rata in elapsed time**, so crank sequences
 telescope to exactly the single-settlement charge. The firm-cash breach
@@ -540,7 +541,6 @@ does not), so the version is pinned. OZ math stays a git dep (it ships
 | RiskOracle (shared) | `0xac39229ae9e9547582aa607c1bc084b42fd722aa5e74595af16875efcffb4cdd` |
 | ProtocolCap (owner) | `0x0b226a0531f0b4436b0c07b4cffaa45a8da64d4e04c8f390a86d950739d03eec` |
 | OracleAdminCap (owner) | `0x33adac6f64ae3ecb1af395de98f9a4f0708d1d97f4848a32dc428a7b9e651b87` |
-| UpgradeCap (owner) | `0xbe6518c77007f7fb3940faed2b4b3bf5ec8a6a7fcc653f66eeee548614149fe2` |
 
 **Proven loops:**
 - `scripts/deploy-test.ts` — create institution → deposit 50 DBUSDC →

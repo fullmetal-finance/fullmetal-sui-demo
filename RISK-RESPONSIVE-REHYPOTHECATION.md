@@ -344,7 +344,7 @@ on-chain.
 
 | Param | Default | Meaning | Anchor |
 |---|---|---|---|
-| $\lambda$ | 0.94 | EWMA decay | GARCH-family variance model ([Chaos Aave methodology]; [BoE 597] baseline M1) |
+| $\lambda$ | 0.94 | EWMA decay (demo runs **0.60**: at ~1.2 s/print the whole latch→release arc must fit ~14 prints, so the half-life is scaled to the stage cadence — retunable live via `retune_vol`) | GARCH-family variance model ([Chaos Aave methodology]; [BoE 597] baseline M1) |
 | $q$ | 0.99 | buffer quantile | SIMM 99% ([SIMM v2.4]); Chaos p99 ([Chaos Aave methodology]); CCP ≥99% ([Chicago Fed 2016]) |
 | $z^{*}$ | 4 | shock latch, in σ | subsumes current 15%-print trigger |
 | $\sigma^{ceil}$ | 8%/day (SPCX) | regime latch | per-underlying, admin-set |

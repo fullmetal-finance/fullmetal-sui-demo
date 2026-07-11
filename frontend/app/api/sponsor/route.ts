@@ -33,6 +33,11 @@ export async function POST(request: Request) {
     });
     return Response.json({ bytes: sponsored.bytes, digest: sponsored.digest });
   } catch (e) {
-    return Response.json(enokiErrorDetail(e), { status: 502 });
+    const detail = enokiErrorDetail(e);
+    // Enoki 4xx = OUR transaction is bad (dry-run failure, disallowed target…)
+    // → 400, so the client knows the self-paid fallback won't help either.
+    // Only genuine Enoki-side trouble (5xx / no response) reads as 502.
+    const status = detail.enokiStatus && detail.enokiStatus < 500 ? 400 : 502;
+    return Response.json(detail, { status });
   }
 }

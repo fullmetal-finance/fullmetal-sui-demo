@@ -26,7 +26,19 @@ import { suiRead } from "./sui";
  *  on-chain, then request a FRESH sponsorship for the same kind bytes, re-sign
  *  (silent with a live session), and execute that. Sponsor-side 5xxs are retried
  *  with backoff (a failed sponsorship leaves nothing behind). Resolves to the
- *  tx digest. */
+ *  tx digest.
+ *
+ *  ALTERNATE PATH — self-paid gas, used ONLY while Enoki is failing: when the
+ *  full-cycle retry still can't get a tx through Enoki's infra (and the failure
+ *  isn't the tx's own fault — those surface as 4xx and are rethrown), the ops
+ *  wallet tops the zkLogin address up with SUI (/api/gas), the SAME PTB is
+ *  rebuilt as a normal self-paid tx, the wallet signs it, and it goes out over
+ *  plain JSON-RPC — no Enoki leg at all. A short cooldown then routes
+ *  subsequent actions straight to the fallback so each click doesn't re-lose
+ *  ~60s to Enoki's hang-then-502, after which Enoki gets first shot again. */
+const ENOKI_RETRY_AFTER_MS = 120_000;
+let enokiDownUntil = 0;
+
 export function useSponsoredExecute() {
   const dAppKit = useDAppKit();
   const client = useCurrentClient();
@@ -36,23 +48,36 @@ export function useSponsoredExecute() {
   return useCallback(
     async (build: (tx: Transaction) => void): Promise<string> => {
       if (!account) throw new Error("Sign in first.");
+      const sender = account.address;
+
+      // Enoki was just observed failing — don't re-probe it on every action.
+      if (Date.now() < enokiDownUntil) return selfPaidExecute(dAppKit, sender, build);
 
       const tx = new Transaction();
       build(tx);
       // Set the sender so sender-dependent intents (e.g. coinWithBalance picking
       // the user's coins) resolve at build time. onlyTransactionKind still emits
       // only the kind; Enoki wraps in the sender + sponsor gas.
-      tx.setSenderIfNotSet(account.address);
+      tx.setSenderIfNotSet(sender);
       const kindBytes = toBase64(await tx.build({ client, onlyTransactionKind: true }));
 
       let lastErr: unknown;
       let prevDigest: string | null = null;
       for (let cycle = 0; cycle < 2; cycle++) {
-        const sponsored = await postJson<{ bytes: string; digest: string }>(
-          "/api/sponsor",
-          { network, transactionKindBytes: kindBytes, sender: account.address },
-          3, // transient-5xx retries: sponsorship failures leave nothing behind
-        );
+        let sponsored: { bytes: string; digest: string };
+        try {
+          sponsored = await postJson<{ bytes: string; digest: string }>(
+            "/api/sponsor",
+            { network, transactionKindBytes: kindBytes, sender },
+            3, // transient-5xx retries: sponsorship failures leave nothing behind
+          );
+        } catch (e) {
+          // 4xx = the TX itself failed Enoki's dry-run — self-paid gas cannot
+          // fix that, so surface it. Anything else is Enoki infra → fallback.
+          if (e instanceof ApiError && e.status < 500) throw e;
+          lastErr = e;
+          break;
+        }
 
         const { signature } = await dAppKit.signTransaction({
           transaction: sponsored.bytes,
@@ -77,10 +102,47 @@ export function useSponsoredExecute() {
           prevDigest = sponsored.digest;
         }
       }
-      throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+
+      // Enoki's rails are failing even after the full-cycle retry (the testnet
+      // outage signature: sponsor 200 → execute hangs ~30s → 502). One last
+      // landed-check, then switch to the alternate path.
+      if (prevDigest && (await landedOnChain(prevDigest, 3_000))) return prevDigest;
+      enokiDownUntil = Date.now() + ENOKI_RETRY_AFTER_MS;
+      console.warn("[fullmetal] Enoki sponsorship failing — falling back to self-paid gas.", lastErr);
+      return selfPaidExecute(dAppKit, sender, build);
     },
     [dAppKit, client, network, account],
   );
+}
+
+/** The alternate path: same PTB, but the zkLogin address pays its own gas
+ *  (topped up from the ops wallet) and the tx is executed over plain JSON-RPC,
+ *  bypassing Enoki entirely. */
+async function selfPaidExecute(
+  dAppKit: ReturnType<typeof useDAppKit>,
+  sender: string,
+  build: (tx: Transaction) => void,
+): Promise<string> {
+  // server sends a sliver of SUI from the ops wallet if the balance is short
+  await postJson("/api/gas", { address: sender }, 2);
+
+  const tx = new Transaction();
+  build(tx);
+  tx.setSenderIfNotSet(sender);
+  const bytes = toBase64(await tx.build({ client: suiRead }));
+
+  const signed = await dAppKit.signTransaction({ transaction: bytes });
+  const res = await suiRead.executeTransactionBlock({
+    transactionBlock: signed.bytes,
+    signature: signed.signature,
+    options: { showEffects: true },
+  });
+  if (res.effects?.status.status !== "success") {
+    throw new Error(res.effects?.status.error ?? "transaction failed on-chain");
+  }
+  // wait for indexing so follow-up reads see the effects
+  await suiRead.waitForTransaction({ digest: res.digest, timeout: 30_000, pollInterval: 1_000 });
+  return res.digest;
 }
 
 /** Did the sponsored digest reach finality despite the API error? */
@@ -90,6 +152,16 @@ async function landedOnChain(digest: string, timeout: number): Promise<boolean> 
     return true;
   } catch {
     return false;
+  }
+}
+
+class ApiError extends Error {
+  status: number;
+  code?: string;
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.status = status;
+    this.code = code;
   }
 }
 
@@ -110,7 +182,8 @@ async function postJson<T>(url: string, body: unknown, tries = 1): Promise<T> {
     }
     const data = await res.json().catch(() => ({}));
     if (res.ok) return data as T;
-    lastErr = new Error((data as { error?: string }).error ?? `${url} failed (${res.status})`);
+    const err = data as { error?: string; code?: string };
+    lastErr = new ApiError(err.error ?? `${url} failed (${res.status})`, res.status, err.code);
     if (res.status < 500) throw lastErr; // 4xx is real — don't hammer it
     await backoff(i);
   }

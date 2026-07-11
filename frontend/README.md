@@ -70,13 +70,15 @@ app/
                         MarketRfqs, CreateOtcModal, RatesBar, ManageModal, ...
   api/
     sponsor, execute    Enoki sponsored-transaction backend
+    gas                 SUI top-up from the ops wallet (self-paid fallback path)
     faucet              mock fiat on-ramp (mints + returns DBUSDC)
     oracle              keeper push / spike / recall sequence
     makers              mock competing RFQ quotes
     rates               live USDC supply APRs + venue risk reads (DeepBook / Suilend / Navi)
 lib/
   fullmetal.ts          on-chain config — package, singletons, Move-call targets
-  sponsored.ts          gasless execute hook (build kind → sponsor → sign → execute)
+  sponsored.ts          gasless execute hook (build kind → sponsor → sign → execute;
+                        auto-falls back to self-paid gas via /api/gas when Enoki fails)
   institution-state.ts  on-chain reads (treasury, positions, oracle)
   otc.ts / quotes.ts    create OTC + accept RFQ quote
   rehypo-actions.ts     rehypothecate / recall hooks
@@ -94,12 +96,15 @@ lib/
    **cross-margin panel** shows the trade's IM fenced inside the one pooled treasury.
 4. **Collateral manager** — allocate across DeepBook (real testnet txs) and
    Suilend/Navi (SIM-badged, live mainnet APRs), above the on-chain liquidity floor.
-   Then **Run scenario** (e.g. Flash crash): every print is a real on-chain
-   `push_price_v2`; the EWMA σ latch fires → breached positions take **margin calls**
-   (90 s cure window) → the **permissionless recall** brings collateral home and the
-   positions pay & survive → three calm prints later the latch **auto-releases
-   on-chain** and the margin redeposits. The chart marks the recall and redeposit
-   ticks with their tx links. See [DEMO.md](../DEMO.md) for the full runbook.
+   Then **▶ Start live market**: a continuous ticker streams real on-chain
+   `push_price_v2` prints (~1.5 s cadence) with 💥 Crash / ▲ Spike / ≈ Calm
+   injection buttons. A crash latches the EWMA σ trigger → breached positions take
+   **margin calls** (90 s cure window) → the **permissionless recall** brings
+   collateral home and the positions pay & survive → three calm prints later the
+   latch **auto-releases on-chain** and the margin redeposits. The chart marks the
+   recall and redeposit ticks with their tx links. (A manual *Push print* field
+   drives the same machinery one print at a time.) See [DEMO.md](../DEMO.md) for
+   the full runbook.
 
 The protocol architecture (object model, accounting, capability auth, lifecycle flows)
 is in [ARCHITECTURE.md](https://github.com/fullmetal-finance/fullmetal-sui-demo/blob/main/ARCHITECTURE.md).

@@ -8,6 +8,9 @@ cure → survive → release drill through the app's own API (`scripts/drill-smo
 
 ```bash
 # 0. balances — ops wallet 0x6849af…d5576 wants ≥ 2 SUI and ≥ 150 DBUSDC per run
+#    (+ ~0.3 SUI per demo account if Enoki is down: the app then auto-falls back
+#    to SELF-PAID gas — /api/gas tops the zkLogin address up from the ops wallet,
+#    the tx goes out over plain JSON-RPC. Enoki is retried first every ~2 min.)
 #    SUI: https://faucet.sui.io/?address=0x6849af55b4f2f429cb2665ec9f4d42c17eecc76211f14caf959903ad786d5576
 cd scripts
 npx tsx swap-dbusdc.ts 300      # top up DBUSDC by swapping faucet SUI
@@ -82,12 +85,19 @@ sign-in. Not wired into the UI: Enoki's execute endpoint proved flaky.)
   gRPC-only now). If it degrades: `NEXT_PUBLIC_SUI_RPC_URL=https://sui-testnet-endpoint.blockvision.org`
   (+ same in `SUI_RPC_URL`) and restart. Writes (Enoki/dApp Kit) use gRPC on the
   official node and are unaffected.
-- **Enoki 5xx flakiness** (seen 2026-07-12 on both their sponsor and execute
-  endpoints; our request shape verified good against their API): the executor
-  self-heals — sponsorship retries with backoff, and an execute failure first
-  checks whether the digest actually LANDED on-chain before retrying or
-  erroring. On stage this shows as an action taking a few extra seconds. If
-  Enoki is fully down, fall back to the recorded run.
+- **Enoki 5xx / execute outage** (seen 2026-07-11: sponsor 200 but execute
+  hangs ~30s → 502, Mysten-side; our request shape verified good against their
+  API — reported to Mysten): the executor self-heals in three stages —
+  (1) sponsorship retries with backoff, (2) an execute failure first checks
+  whether the digest actually LANDED on-chain before retrying full-cycle, and
+  (3) if Enoki's rails are still failing, it **auto-falls back to SELF-PAID
+  gas**: `/api/gas` tops the zkLogin address up from the ops wallet and the
+  same PTB goes out over plain JSON-RPC (no Enoki leg). A 2-min cooldown then
+  skips Enoki so later actions are fast; Enoki gets first shot again after.
+  On stage the FIRST action during an outage costs ~60s of discovery; the rest
+  are normal speed. Tx-level errors (dry-run failures) still surface — the
+  fallback only fires on Enoki infrastructure errors. If everything is down,
+  fall back to the recorded run.
 - **Manual mode**: the collateral manager keeps a manual *Push print* field —
   same on-chain machinery, one print at a time (the threshold label shows the
   live latch level).

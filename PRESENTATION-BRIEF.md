@@ -4,8 +4,10 @@ Deep background for the six things the judges ask for, plus hostile-Q&A preparat
 and a facts cheat-sheet. Protocol-specific content is grounded in this repo
 (WHITEPAPER.md, RISK-RESPONSIVE-REHYPOTHECATION.md, ARCHITECTURE.md, the code, and the
 live smokes run 2026-07-10/11). Market and ecosystem figures were verified against
-external sources on 2026-07-12 (web research; full link list in the final section) —
-each carries its source inline. Event context: Sui Overflow's demo day is judged by a
+external sources on 2026-07-11 (web research; full link list in the final section) —
+each carries its source inline. Figures marked ★ are widely-reported
+order-of-magnitude numbers quoted for color; they were NOT re-verified to a
+primary source the way everything else here was — don't lead with them. Event context: Sui Overflow's demo day is judged by a
 large expert panel (the 2024 edition had 47 judges), and Fullmetal sits squarely on two
 official tracks: *financial primitives/payment rails* and the *DeepBook-powered
 trading & liquidity* specialized track — say so in the open.
@@ -213,6 +215,13 @@ value moves only through hot-potato tickets that cannot be dropped.
 - **The testnet fullnode dropped JSON-RPC the week of the demo** (gRPC-only now) — found
   in audit, reads migrated to alternate endpoints with env-based failover. (Good answer
   to "what breaks in production?": infra churn, and we've already survived some.)
+- **Enoki's testnet execute endpoint went down the week of the demo** (sponsor 200 →
+  execute hangs 30s → gateway 502; isolated with a minimal headless repro, confirmed
+  Mysten-side, reported). Response: the executor got a **self-paid-gas fallback** —
+  if Enoki's rails fail after the retry cycle, the ops wallet tops up the zkLogin
+  address and the same PTB executes over plain JSON-RPC. Sponsorship stays primary;
+  the fallback fires only on infra errors, never on transaction errors. Two infra
+  outages in demo week, both survived with code, is the honest resilience story.
 
 ### 3.4 Verification story (memorize the numbers)
 - **40/40 Move unit tests** — lifecycle, RFQ/direct/two-way economics, cross-margin
@@ -235,7 +244,7 @@ value moves only through hot-potato tickets that cannot be dropped.
 | Oracle prints, EWMA latch/release, permissionless recall, margin call + cure + liquidation | **Real, testnet** (cure window set to 90s for the stage; production target ~10 min — an internal constant, retunable) |
 | DeepBook margin pool rehypothecation | **Real, testnet** (the actual DeepBook margin package) |
 | Suilend / Navi | **Balances simulated in the UI** (badged SIM), accruing at **live mainnet APRs**; the underlying supply/withdraw PTBs are **validated against live mainnet under dry-run** |
-| Gas | Users pay none — Enoki-sponsored zkLogin transactions |
+| Gas | Users pay none — Enoki-sponsored zkLogin transactions (with an automatic self-paid fallback, ops-funded, if Enoki's rails fail) |
 
 Volunteering this table builds more credibility than any claim. The one-liner:
 *"Everything you'll watch is a real transaction on testnet; the two mainnet-only venues
@@ -588,7 +597,7 @@ is the differentiator to flaunt: every parameter traces to a primary source.
 - Current testnet package: `0xf8b57f09…635a4a` (additive upgrade over the original
   `0x3dfbfa52…`, published live during demo prep).
 
-**Market numbers (verified 2026-07-12; sources in the final section):**
+**Market numbers (verified 2026-07-11; sources in the final section):**
 - **$846T** OTC notional (end-June 2025, +16% yoy — biggest jump since 2008) /
   **$21.8T** gross market value (+29%) — BIS.
 - **$1.6T** margin collected by leading dealers for non-cleared exposures at year-end
@@ -631,7 +640,7 @@ target of the production path (§4.3).
 
 ---
 
-## 11. External sources (verified 2026-07-12)
+## 11. External sources (verified 2026-07-11)
 
 **Market / problem**
 - [BIS — OTC derivatives statistics at end-June 2025](https://www.bis.org/publ/otc_hy2512.htm) — $846T notional (+16%), $21.8T gross market value (+29%)
