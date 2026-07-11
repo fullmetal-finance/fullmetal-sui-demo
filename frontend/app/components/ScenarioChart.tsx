@@ -3,13 +3,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { SPCX_VOL, usd } from "@/lib/fullmetal";
+import { CHART, STATUS } from "@/lib/palette";
 
-/* The scenario chart: a live price line (top) + the EWMA σ signal (bottom)
-   sharing one x-axis of oracle prints. Every point is a confirmed on-chain
-   push; the red/green rules mark the ticks where the RECALL and REDEPOSIT
-   actually fired. Hand-rolled SVG in the app's ink-on-paper language:
-   2px round-cap lines, ≥8px event dots with a surface ring, hairline grid,
-   text in text tokens only. Single series per plot → no legend. */
+/* The live market chart: the price feed (top, blue) + the EWMA σ signal the
+   protocol actually reads (bottom, violet) on one shared x-axis of oracle
+   prints. Every point is a confirmed on-chain push; the red/green rules mark
+   the ticks where the RECALL and REDEPOSIT fired. Rolling window — the feed
+   scrolls left as new prints land. 2px round-cap lines, ≥8px ringed event
+   dots, hairline grid, text in text tokens. Single series per plot → no
+   legend boxes; the σ plot is titled inline. */
 
 export type ChartPoint = {
   price: number;
@@ -19,35 +21,37 @@ export type ChartPoint = {
 };
 
 export type ChartEvent = {
-  tick: number; // index into points
+  tick: number; // ABSOLUTE print index (offset by startTick for display)
   kind: "recall" | "redeposit";
-  amount: number; // USD moved (aggregate across venues)
+  amount: number;
 };
 
-const RED = "#b4341f";
-const GREEN = "#1f6f4d";
+const RED = STATUS.red;
+const GREEN = STATUS.green;
 
 const PAD_L = 10;
 const PAD_R = 64;
-const PRICE_H = 132;
-const GAP_H = 26; // between plots (σ title lives here)
-const SIGMA_H = 64;
-const TOP = 14;
+const PRICE_H = 138;
+const GAP_H = 26;
+const SIGMA_H = 62;
+const TOP = 16;
 const BOTTOM = 6;
 const HEIGHT = TOP + PRICE_H + GAP_H + SIGMA_H + BOTTOM;
 
 export default function ScenarioChart({
   points,
   events,
-  totalTicks,
-  frame,
+  startTick = 0,
+  minSlots = 24,
 }: {
+  /** the visible window of prints (already sliced by the caller) */
   points: ChartPoint[];
+  /** events with ABSOLUTE tick indexes; drawn when inside the window */
   events: ChartEvent[];
-  /** x-domain size — the scenario's full length so the line grows into a stable frame */
-  totalTicks: number;
-  /** optional stable y-domain (min/max of the selected scenario path) */
-  frame?: { priceMin: number; priceMax: number };
+  /** absolute index of points[0] (rolling-window offset) */
+  startTick?: number;
+  /** slot count the window grows into before it starts scrolling */
+  minSlots?: number;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(720);
@@ -64,27 +68,24 @@ export default function ScenarioChart({
     return () => ro.disconnect();
   }, []);
 
-  const n = Math.max(totalTicks, points.length, 2);
+  const n = Math.max(minSlots, points.length, 2);
   const x = (i: number) => PAD_L + (i / (n - 1)) * (width - PAD_L - PAD_R);
 
   const [pMin, pMax] = useMemo(() => {
     const prices = points.map((p) => p.price);
-    let lo = frame ? frame.priceMin : Math.min(...(prices.length ? prices : [0]));
-    let hi = frame ? frame.priceMax : Math.max(...(prices.length ? prices : [1]));
-    if (prices.length) {
-      lo = Math.min(lo, ...prices);
-      hi = Math.max(hi, ...prices);
-    }
-    const pad = Math.max((hi - lo) * 0.12, 1);
+    if (!prices.length) return [0, 1];
+    const lo = Math.min(...prices);
+    const hi = Math.max(...prices);
+    const pad = Math.max((hi - lo) * 0.14, hi * 0.004, 0.5);
     return [lo - pad, hi + pad];
-  }, [points, frame]);
+  }, [points]);
   const yPrice = (v: number) => TOP + PRICE_H - ((v - pMin) / (pMax - pMin)) * PRICE_H;
 
   const sigmaTop = TOP + PRICE_H + GAP_H;
-  const sMax = useMemo(() => {
-    const m = Math.max(SPCX_VOL.sigmaCeilBps * 1.25, ...points.map((p) => p.sigmaBps * 1.1), 1);
-    return m;
-  }, [points]);
+  const sMax = useMemo(
+    () => Math.max(SPCX_VOL.sigmaCeilBps * 1.25, ...points.map((p) => p.sigmaBps * 1.1), 1),
+    [points],
+  );
   const ySigma = (v: number) => sigmaTop + SIGMA_H - (Math.min(v, sMax) / sMax) * SIGMA_H;
 
   const releaseBandBps = (SPCX_VOL.sigmaCeilBps * SPCX_VOL.thetaRelBps) / 10_000;
@@ -95,7 +96,7 @@ export default function ScenarioChart({
     ? `${sigmaLine}L${x(points.length - 1).toFixed(1)},${(sigmaTop + SIGMA_H).toFixed(1)}L${x(0).toFixed(1)},${(sigmaTop + SIGMA_H).toFixed(1)}Z`
     : "";
 
-  // latched span(s): consecutive runs of triggered points → light red wash
+  // latched span(s) → light red wash across both plots
   const spans = useMemo(() => {
     const out: [number, number][] = [];
     let start = -1;
@@ -109,6 +110,10 @@ export default function ScenarioChart({
     if (start >= 0) out.push([start, points.length - 1]);
     return out;
   }, [points]);
+
+  const windowEvents = events
+    .map((ev) => ({ ...ev, i: ev.tick - startTick }))
+    .filter((ev) => ev.i >= 0 && ev.i < points.length);
 
   const last = points[points.length - 1];
 
@@ -131,9 +136,9 @@ export default function ScenarioChart({
         onPointerMove={onMove}
         onPointerLeave={() => setHover(null)}
         role="img"
-        aria-label="SPCX oracle prints and EWMA volatility with recall and redeposit markers"
+        aria-label="Live SPCX oracle prints and EWMA volatility with recall and redeposit markers"
       >
-        {/* ---- grids (hairline, recessive) ---- */}
+        {/* grids (hairline, recessive) */}
         {priceTicks.map((t) => (
           <g key={`pt${t}`}>
             <line x1={PAD_L} y1={yPrice(t)} x2={width - PAD_R} y2={yPrice(t)} stroke="var(--color-line)" strokeWidth="1" />
@@ -143,48 +148,48 @@ export default function ScenarioChart({
           </g>
         ))}
 
-        {/* ---- latched span wash (status region, labeled by the markers) ---- */}
+        {/* latched span wash */}
         {spans.map(([a, b], i) => (
-          <rect key={`sp${i}`} x={x(a)} y={TOP} width={Math.max(x(b) - x(a), 2)} height={PRICE_H + GAP_H + SIGMA_H} fill={RED} opacity="0.055" />
+          <rect key={`sp${i}`} x={x(a)} y={TOP} width={Math.max(x(b) - x(a), 2)} height={PRICE_H + GAP_H + SIGMA_H} fill={RED} opacity="0.06" />
         ))}
 
-        {/* ---- σ plot: ceiling + release rules, area wash + line ---- */}
-        <text x={PAD_L} y={sigmaTop - 8} className="fill-[var(--color-muted)]" fontSize="10" fontFamily="var(--font-mono)" letterSpacing="0.08em">
-          EWMA σ (bps / print)
+        {/* σ plot: title, ceiling + release rules, wash + line */}
+        <text x={PAD_L} y={sigmaTop - 8} fill={CHART.sigma} fontSize="10" fontWeight="600" fontFamily="var(--font-mono)" letterSpacing="0.08em">
+          EWMA σ (bps / print) — the on-chain risk signal
         </text>
-        <line x1={PAD_L} y1={ySigma(SPCX_VOL.sigmaCeilBps)} x2={width - PAD_R} y2={ySigma(SPCX_VOL.sigmaCeilBps)} stroke={RED} strokeWidth="1" opacity="0.45" strokeDasharray="1 3" />
+        <line x1={PAD_L} y1={ySigma(SPCX_VOL.sigmaCeilBps)} x2={width - PAD_R} y2={ySigma(SPCX_VOL.sigmaCeilBps)} stroke={RED} strokeWidth="1" opacity="0.5" strokeDasharray="1 3" />
         <text x={width - PAD_R + 8} y={ySigma(SPCX_VOL.sigmaCeilBps) + 3.5} className="fill-[var(--color-faint)]" fontSize="10" fontFamily="var(--font-mono)">
           σ ceil
         </text>
-        <line x1={PAD_L} y1={ySigma(releaseBandBps)} x2={width - PAD_R} y2={ySigma(releaseBandBps)} stroke={GREEN} strokeWidth="1" opacity="0.5" strokeDasharray="1 3" />
+        <line x1={PAD_L} y1={ySigma(releaseBandBps)} x2={width - PAD_R} y2={ySigma(releaseBandBps)} stroke={GREEN} strokeWidth="1" opacity="0.55" strokeDasharray="1 3" />
         <text x={width - PAD_R + 8} y={ySigma(releaseBandBps) + 3.5} className="fill-[var(--color-faint)]" fontSize="10" fontFamily="var(--font-mono)">
           release
         </text>
-        {sigmaArea && <path d={sigmaArea} fill="var(--color-ink)" opacity="0.08" />}
-        {sigmaLine && <path d={sigmaLine} fill="none" stroke="var(--color-ink-soft)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />}
+        {sigmaArea && <path d={sigmaArea} fill={CHART.sigma} opacity="0.13" />}
+        {sigmaLine && <path d={sigmaLine} fill="none" stroke={CHART.sigma} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />}
 
-        {/* ---- price line ---- */}
-        {pricePath && <path d={pricePath} fill="none" stroke="var(--color-ink)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />}
+        {/* price line */}
+        {pricePath && <path d={pricePath} fill="none" stroke={CHART.price} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />}
 
-        {/* ---- event markers: rule + ringed dot + label chip ---- */}
-        {events.map((ev) => {
-          const p = points[ev.tick];
+        {/* event markers: rule + ringed dot + label chip */}
+        {windowEvents.map((ev) => {
+          const p = points[ev.i];
           if (!p) return null;
-          const cx = x(ev.tick);
+          const cx = x(ev.i);
           const isRecall = ev.kind === "recall";
           const color = isRecall ? RED : GREEN;
           const label = isRecall ? `▼ RECALL ${usd(ev.amount, { maximumFractionDigits: 0 })}` : `▲ REDEPOSIT ${usd(ev.amount, { maximumFractionDigits: 0 })}`;
-          const flip = cx > width - PAD_R - 150; // keep the chip inside the plot
+          const flip = cx > width - PAD_R - 150;
           return (
             <g key={`${ev.kind}${ev.tick}`}>
-              <line x1={cx} y1={TOP - 2} x2={cx} y2={sigmaTop + SIGMA_H} stroke={color} strokeWidth="1" opacity="0.85" />
+              <line x1={cx} y1={TOP - 2} x2={cx} y2={sigmaTop + SIGMA_H} stroke={color} strokeWidth="1.5" opacity="0.9" />
               <circle cx={cx} cy={yPrice(p.price)} r="6.5" fill={color} stroke="var(--color-surface)" strokeWidth="2" />
               <text
                 x={flip ? cx - 7 : cx + 7}
-                y={TOP + 9}
+                y={isRecall ? TOP + 8 : TOP + 22}
                 textAnchor={flip ? "end" : "start"}
                 fontSize="10.5"
-                fontWeight="600"
+                fontWeight="700"
                 fontFamily="var(--font-mono)"
                 fill={color}
               >
@@ -194,25 +199,25 @@ export default function ScenarioChart({
           );
         })}
 
-        {/* ---- live end-dot ---- */}
+        {/* live end-dot */}
         {last && (
           <circle
             cx={x(points.length - 1)}
             cy={yPrice(last.price)}
             r="4.5"
-            fill={last.triggered ? RED : "var(--color-ink)"}
+            fill={last.triggered ? RED : CHART.price}
             stroke="var(--color-surface)"
             strokeWidth="2"
             className="fm-pulse"
           />
         )}
 
-        {/* ---- crosshair ---- */}
+        {/* crosshair */}
         {hover != null && hovered && (
           <g pointerEvents="none">
             <line x1={x(hover)} y1={TOP} x2={x(hover)} y2={sigmaTop + SIGMA_H} stroke="var(--color-line-strong)" strokeWidth="1" />
-            <circle cx={x(hover)} cy={yPrice(hovered.price)} r="4" fill="var(--color-ink)" stroke="var(--color-surface)" strokeWidth="2" />
-            <circle cx={x(hover)} cy={ySigma(hovered.sigmaBps)} r="4" fill="var(--color-ink-soft)" stroke="var(--color-surface)" strokeWidth="2" />
+            <circle cx={x(hover)} cy={yPrice(hovered.price)} r="4" fill={CHART.price} stroke="var(--color-surface)" strokeWidth="2" />
+            <circle cx={x(hover)} cy={ySigma(hovered.sigmaBps)} r="4" fill={CHART.sigma} stroke="var(--color-surface)" strokeWidth="2" />
           </g>
         )}
       </svg>
@@ -222,14 +227,14 @@ export default function ScenarioChart({
         <div
           className="pointer-events-none absolute z-10 rounded-[7px] border border-line-strong bg-surface px-3 py-2 font-mono text-[11px] leading-[1.7] shadow-sm"
           style={{
-            left: Math.min(Math.max(x(hover) + 10, 0), width - 170),
+            left: Math.min(Math.max(x(hover) + 10, 0), width - 175),
             top: TOP + 6,
           }}
         >
-          <div className="text-[10px] uppercase tracking-[0.08em] text-muted">print {hover + 1}</div>
+          <div className="text-[10px] uppercase tracking-[0.08em] text-muted">print {startTick + hover + 1}</div>
           <div className="text-[13px] font-semibold text-ink">{usd(hovered.price)}</div>
           <div className="text-muted">
-            σ {hovered.sigmaBps} bps ·{" "}
+            <span style={{ color: CHART.sigma }}>σ {hovered.sigmaBps} bps</span> ·{" "}
             {hovered.triggered ? (
               <span className="font-semibold" style={{ color: RED }}>LATCHED</span>
             ) : (

@@ -54,3 +54,69 @@ export const SCENARIOS: Scenario[] = [
 export function scenarioByKey(key: ScenarioKey): Scenario {
   return SCENARIOS.find((s) => s.key === key) ?? SCENARIOS[0];
 }
+
+/* ------------------------------------------------------------------ */
+/*  Live market simulator — a continuous ticker that FEELS like a real */
+/*  feed: gentle mean-reverting drift in calm, injectable crash/spike  */
+/*  events followed by decaying turbulence, then organic stabilisation.*/
+/*  The on-chain EWMA reacts naturally: the gap print latches (z ≫ 4σ),*/
+/*  the decaying chop keeps σ above the release band for a few prints, */
+/*  and ~3 calm prints after σ decays the latch auto-releases.         */
+/* ------------------------------------------------------------------ */
+
+export type MarketEventKind = "crash" | "spike" | "calm";
+
+export type MarketSim = {
+  /** queue a regime event; it lands on the next tick */
+  inject: (kind: MarketEventKind) => void;
+  /** produce the next print (USD) */
+  next: () => number;
+  /** current turbulence level, bps/print (for UI hints) */
+  vol: () => number;
+};
+
+export function createMarketSim(startPrice: number): MarketSim {
+  let level = startPrice;
+  let anchor = startPrice; // post-event equilibrium the drift reverts toward
+  let volBps = 42; // print-vol regime; decays back to calm after events
+  let pending: MarketEventKind | null = null;
+
+  // Print magnitude bounded to [0.6, 1.8]× the vol regime (random sign): keeps
+  // the on-chain EWMA σ from collapsing in quiet stretches, where an ordinary
+  // print would read as a multi-σ "shock" and false-latch the trigger
+  // (max/min magnitude ratio 3 ⇒ worst-case z ≈ 2, safely under the 4σ latch).
+  const draw = () => (Math.random() < 0.5 ? -1 : 1) * (0.6 + 1.2 * Math.random());
+  const round = (p: number) => Math.max(0.01, Math.round(p * 100) / 100);
+
+  return {
+    inject(kind: MarketEventKind) {
+      pending = kind;
+    },
+    vol: () => Math.round(volBps),
+    next(): number {
+      if (pending === "crash") {
+        pending = null;
+        level = level * (1 - (0.18 + Math.random() * 0.04)); // −18…22% gap
+        anchor = level;
+        volBps = 520; // violent aftermath, decays below
+        return round(level);
+      }
+      if (pending === "spike") {
+        pending = null;
+        level = level * (1 + (0.18 + Math.random() * 0.05)); // +18…23% squeeze
+        anchor = level;
+        volBps = 520;
+        return round(level);
+      }
+      if (pending === "calm") {
+        pending = null;
+        volBps = 42;
+      }
+      volBps = Math.max(40, volBps * 0.78); // turbulence half-life ≈ 3 prints
+      const shock = (draw() * volBps) / 10_000;
+      const pull = ((anchor - level) / level) * 0.06; // gentle mean reversion
+      level = level * (1 + shock + pull);
+      return round(level);
+    },
+  };
+}

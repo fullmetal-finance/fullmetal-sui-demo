@@ -73,8 +73,9 @@ async function readStatus(c: SuiJsonRpcClient, instId?: string): Promise<OracleS
   };
 }
 
-/** Contracts among `otcIds` that are crankable right now: MM-breached, or
- *  carrying a pending margin call (stale or live). Returns their party ids. */
+/** Contracts among `otcIds` that are crankable right now: ACTIVE, not past
+ *  expiry (`settle_on_breach` aborts on expired contracts — code 78, use
+ *  `close` instead), and MM-breached or carrying a pending margin call. */
 async function crankable(c: SuiJsonRpcClient, otcIds: string[]) {
   if (!otcIds.length) return [];
   const tx = new Transaction();
@@ -90,15 +91,27 @@ async function crankable(c: SuiJsonRpcClient, otcIds: string[]) {
     c.devInspectTransactionBlock({ sender: SHARED.riskOracle, transactionBlock: tx }),
     c.multiGetObjects({ ids: otcIds, options: { showContent: true } }),
   ]);
+  const now = Date.now();
   const out: { otcId: string; instLong: string; instShort: string }[] = [];
   otcIds.forEach((otcId, i) => {
     const breached = (r.results?.[2 * i]?.returnValues?.[0]?.[0] as number[] | undefined)?.[0] === 1;
     const hasCall = ((r.results?.[2 * i + 1]?.returnValues?.[0]?.[0] ?? []) as number[])[0] === 1;
     const f = (objs[i]?.data?.content as { fields?: Record<string, string> } | undefined)?.fields;
     if (!f || Number(f.status ?? "0") !== 0) return;
+    const expiry = Number(f.expiry_ms ?? "0");
+    if (expiry > 0 && now >= expiry) return; // expired → only `close` may settle it
     if (breached || hasCall) out.push({ otcId, instLong: f.inst_long!, instShort: f.inst_short! });
   });
   return out;
+}
+
+/** Human-readable reasons for the two crank aborts a demo can hit. */
+function crankAbortReason(err?: string): string | undefined {
+  if (!err) return undefined;
+  if (err.includes("abort code: 78")) return "contract is past expiry — settle it via close; the breach crank no longer applies";
+  if (err.includes("abort code: 77")) return "margin-call cure window still running — crank again after the countdown";
+  if (err.includes("abort code: 73")) return "position is healthy — nothing to crank";
+  return err;
 }
 
 /** settle_on_breach one contract (permissionless, keeper-signed). Returns the
@@ -230,7 +243,13 @@ export async function POST(request: Request) {
           const r = await crank(c, kp, t);
           if (r.ok) marginCalls.push({ otcId: r.otcId, deadline: r.deadline ?? null, status: r.status ?? 0 });
         }
-      } else if (status.triggered && inst && status.rehypothecated > 0 && autoRecall !== false) {
+      }
+      // No margin calls landed (no crankable contracts, or cranks paid outright)
+      // → the plain auto-deleverage path must still fire: recall on the latch.
+      if (
+        status.triggered && inst && status.rehypothecated > 0 && autoRecall !== false &&
+        marginCalls.filter((m) => m.deadline != null).length === 0
+      ) {
         const before = status.rehypothecated;
         const r = await recallOnTrigger(c, kp, inst);
         if (r.ok) {
@@ -276,9 +295,11 @@ export async function POST(request: Request) {
     if (action === "crank") {
       if (typeof otcIds?.[0] !== "string") return Response.json({ error: "missing otcIds" }, { status: 400 });
       const targets = await crankable(c, [otcIds[0]]);
-      if (!targets.length) return Response.json({ error: "contract is healthy — nothing to crank" }, { status: 409 });
+      if (!targets.length) {
+        return Response.json({ error: "not crankable — position is healthy, terminal, or past expiry" }, { status: 409 });
+      }
       const r = await crank(c, kp, targets[0]);
-      if (!r.ok) return Response.json({ error: r.error ?? "crank failed" }, { status: 502 });
+      if (!r.ok) return Response.json({ error: crankAbortReason(r.error) ?? "crank failed" }, { status: 502 });
       return Response.json({ otcId: r.otcId, deadline: r.deadline, status: r.status, digest: r.digest });
     }
 

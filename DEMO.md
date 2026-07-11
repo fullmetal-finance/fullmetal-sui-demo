@@ -20,9 +20,16 @@ npx tsx demo-reset.ts
 cd ../frontend && npm run dev   # http://localhost:3000
 ```
 
-If the signed-in demo account should start fresh: clear the browser's
-localStorage for localhost:3000 (institution/quotes live there), or use a new
-Google test user.
+**Starting a demo account afresh:** sign in with the account → dashboard →
+**↺ reset desk** (next to the institution id). Local-only and instant — no
+transactions, nothing to fail: it clears the account's browser records and
+reopens onboarding. The old institution and its test funds simply stay parked
+on-chain, and the old **handle stays taken** (registry is append-only — pick a
+new one). Equivalent manual fallback: clear localStorage for localhost:3000.
+(If parked funds ever need recovering, `frontend/lib/reset-desk.ts` +
+`scripts/reclaim-smoke.ts` hold a verified on-chain reclaim flow — permissionless
+closes/reclaims work from the ops key too; withdrawal needs the account's own
+sign-in. Not wired into the UI: Enoki's execute endpoint proved flaky.)
 
 ## The demo script
 
@@ -45,21 +52,29 @@ Google test user.
    badges, live mainnet APRs). For the margin-call beat, deploy until
    **liquid < $37** (e.g. $100 desk: DeepBook 40 + Suilend 20 + Navi 10 →
    liquid $30). The on-chain liquidity floor is shown under the gauge.
-7. **THE BEAT** — scenario `Flash crash` → **Run**. Watch the chart draw each
-   on-chain print + the EWMA σ track:
-   - tick 4 (−20% gap, z ≈ 27σ): **trigger latches on-chain** → positions get
-     **MARGIN CALLS** (funds are deployed — due process, not instant death;
-     90 s cure countdown on the margin panel) → auto-cure runs the
-     **permissionless recall** → VM paid from pooled treasury → **positions
-     survive** (red marker: `RECALL $70`).
-   - chop: σ decays; latch holds (release pips 1/3 → 2/3).
-   - tick 10: 3 calm prints → **latch auto-releases on-chain** → the desk
-     **redeposits** (green marker: `REDEPOSIT`).
-   Total ≈ 25–35 s. Every print, the recall, the cranks, and the redeposit
-   are real testnet txs (links in the panel footer).
-8. **Liquidation encore** (optional) — untick *auto-cure*, reset, run again:
-   the margin call ages past the 90 s cure window (countdown on the panel) →
-   *Crank settlement* → **LIQUIDATED** chip.
+7. **THE BEAT** — **▶ Start live market**. A continuous ticker streams real
+   on-chain prints (~1.5 s cadence) with the EWMA σ track under the price.
+   Let it breathe a few seconds, then hit **💥 Crash**:
+   - the −18…22% gap print **latches the trigger on-chain** (z ≫ 4σ) →
+     positions get **MARGIN CALLS** (funds are deployed — due process, not
+     instant death; 90 s cure countdown on the margin panel) → auto-cure runs
+     the **permissionless recall** → VM paid from pooled treasury →
+     **positions survive** (red marker: `RECALL`).
+   - the aftermath chops; σ decays through the violet track; latch holds
+     (release pips 1/3 → 2/3; an out-of-band print resets them — organic).
+   - ~6–7 prints later: 3 calm prints in-band → **latch auto-releases
+     on-chain** → the desk **redeposits** (green marker: `REDEPOSIT`).
+   The market keeps ticking — run **another 💥 Crash** for a second cycle, or
+   **≈ Calm** to settle it, then **■ Stop**. Crash → redeposit ≈ 15–20 s.
+   Every print, the recall, the cranks, and the redeposit are real testnet
+   txs (links in the panel footer).
+8. **Liquidation encore** (optional) — untick *auto-cure*, 💥 Crash again:
+   the margin call ages past the 90 s cure window (countdown on the margin
+   panel) → *Crank settlement* → **LIQUIDATED** chip.
+   NOTE: contracts **past expiry** can't be cranked or recalled against (abort
+   78) — they show `EXPIRED · settle via close` in the margin panel and are
+   excluded automatically. For a clean stage, start from a fresh desk (clear
+   localStorage) rather than reusing week-old contracts.
 
 ## Fallbacks
 
@@ -67,6 +82,12 @@ Google test user.
   gRPC-only now). If it degrades: `NEXT_PUBLIC_SUI_RPC_URL=https://sui-testnet-endpoint.blockvision.org`
   (+ same in `SUI_RPC_URL`) and restart. Writes (Enoki/dApp Kit) use gRPC on the
   official node and are unaffected.
+- **Enoki 5xx flakiness** (seen 2026-07-12 on both their sponsor and execute
+  endpoints; our request shape verified good against their API): the executor
+  self-heals — sponsorship retries with backoff, and an execute failure first
+  checks whether the digest actually LANDED on-chain before retrying or
+  erroring. On stage this shows as an action taking a few extra seconds. If
+  Enoki is fully down, fall back to the recorded run.
 - **Manual mode**: the collateral manager keeps a manual *Push print* field —
   same on-chain machinery, one print at a time (the threshold label shows the
   live latch level).

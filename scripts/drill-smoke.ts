@@ -225,9 +225,21 @@ async function main() {
   n = await instNums(inst);
   console.log(`✓ redeposited: liquid $${n.liquid} · DeepBook $${n.rehyp}`);
 
+  /* SECOND crash, contracts still armed — this time liquid ($33) covers the
+     VM (~$30), so the crank PAYS OUTRIGHT (no margin call). The tick handler
+     must then fall back to the plain auto-recall (the bug class the browser
+     run hit: armed-but-no-calls previously skipped the recall entirely). */
+  const p2 = 150.6 * 0.8;
+  const crash2 = await oracle({ action: 'tick', instId: inst, price: Number(p2.toFixed(2)), otcIds: [otc] });
+  const calledWithDeadline = (crash2.marginCalls ?? []).filter((m: { deadline: number | null }) => m.deadline != null).length;
+  console.log(`\nsecond crash: $${crash2.mark} | latched ${crash2.triggered} | calls-with-deadline ${calledWithDeadline} | recalled ${crash2.recalled} ($${crash2.recalledAmount})`);
+  if (!crash2.triggered) throw new Error('second crash did not latch');
+  if (calledWithDeadline > 0) throw new Error('expected pay-outright (no margin call) on the second crash');
+  if (!crash2.recalled) throw new Error('fallback recall did not fire on armed-but-no-calls latch');
+
   // stage reset for the real demo
   await oracle({ action: 'reset' });
-  console.log('\nPASS — margin call → cure(recall+pay) → survive → on-chain release → redeposit, all live.');
+  console.log('\nPASS — call → cure → survive → release → redeposit, AND armed-but-payable latch still auto-recalls.');
 }
 
 main().catch((e) => {

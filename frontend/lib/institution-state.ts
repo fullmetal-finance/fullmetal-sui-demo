@@ -99,6 +99,7 @@ export async function readUserContracts(
       venue: "DeepBook",
       otcId: o.data!.objectId,
       status: Number(f.status ?? "0"),
+      expiryMs: Number(f.expiry_ms ?? "0"),
     });
   }
   return rows;

@@ -120,7 +120,7 @@ pre-flight:
   [ ] optional drill: New OTC → Direct to "cumberland", 1 SPCX long — makers auto-accept? NO:
       run  npx tsx accept-direct.ts <offerId>  after proposing (see DEMO.md)
   [ ] Collateral manager: deploy across DeepBook (real) + Suilend/Navi (sim) until liquid < ~VM-at-crash
-  [ ] Run scenario "Flash crash" — latch → margin call → auto-cure → release → redeposit
+  [ ] ▶ Start live market → let it tick → 💥 Crash — latch → margin call → auto-cure → release → redeposit
 `);
 }
 

@@ -26,7 +26,7 @@ const MARGIN_POOL = '0xf08568da93834e1ee04f09902ac7b1e78d3fdf113ab4d2106c7265e95
 const MARGIN_REGISTRY = '0x48d7640dfae2c6e9ceeada197a7a1643984b5a24c55a0c6c023dac77e0339f75';
 const CLOCK = '0x6';
 
-const SCRATCH = /^fm(smoke|drill|demo)/;
+const SCRATCH = /^fm(smoke|drill|demo|dust)/;
 const MAKER_FLOAT = 20_000_000n; // keep $20 in each maker desk
 
 function keypair(): Ed25519Keypair {

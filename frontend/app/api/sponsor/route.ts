@@ -1,7 +1,7 @@
 import { EnokiClient } from "@mysten/enoki";
 
 import { enokiErrorDetail } from "@/lib/enoki-error";
-import { ALL_MOVE_TARGETS } from "@/lib/fullmetal";
+import { ALL_MOVE_TARGETS, OPS_ADDRESS } from "@/lib/fullmetal";
 
 /* SERVER ONLY. Sponsored transactions can only be created with a PRIVATE Enoki
    key (it spends the sponsor's gas), so this never runs in the browser.
@@ -27,7 +27,9 @@ export async function POST(request: Request) {
       transactionKindBytes,
       sender,
       allowedMoveCallTargets: ALL_MOVE_TARGETS,
-      allowedAddresses: [sender],
+      // the ops/faucet wallet may receive objects too — "Reset desk" returns
+      // reclaimed test funds there so the mock on-ramp stays stocked
+      allowedAddresses: [sender, OPS_ADDRESS],
     });
     return Response.json({ bytes: sponsored.bytes, digest: sponsored.digest });
   } catch (e) {

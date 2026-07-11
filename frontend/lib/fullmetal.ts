@@ -37,6 +37,11 @@ export const DBUSDC_TYPE =
 
 export const CLOCK = "0x6";
 
+/** Demo operator / faucet wallet — reclaimed test funds return here so the
+ *  mock on-ramp stays stocked ("Reset desk" sends withdrawals to it). */
+export const OPS_ADDRESS =
+  "0x6849af55b4f2f429cb2665ec9f4d42c17eecc76211f14caf959903ad786d5576";
+
 export const DECIMALS = 6;
 export const UNIT = 1_000_000; // 1e6
 
@@ -97,6 +102,7 @@ export const TARGET = {
     submitQuote: `${PACKAGE}::rfq::submit_quote`,
     acceptQuote: `${PACKAGE}::rfq::accept_quote`,
     withdrawQuote: `${PACKAGE}::rfq::withdraw_quote`,
+    reclaimQuote: `${PACKAGE}::rfq::reclaim_expired_quote`,
   },
   otc: {
     settle: `${PACKAGE}::otc_forward::settle`,

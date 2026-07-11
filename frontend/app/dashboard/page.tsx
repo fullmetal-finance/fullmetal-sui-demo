@@ -16,8 +16,9 @@ import QuotesInbox from "../components/QuotesInbox";
 import MarketRfqs from "../components/MarketRfqs";
 import RatesBar from "../components/RatesBar";
 import { DBUSDC_TYPE, TARGET, explorer, usd } from "@/lib/fullmetal";
-import { loadInstitution, saveInstitution, saveQuotes, type InstitutionRecord } from "@/lib/store";
+import { clearInstitution, loadInstitution, saveInstitution, saveQuotes, type InstitutionRecord } from "@/lib/store";
 import { readAcceptedOffers, readInstitution, readUserContracts, type InstState } from "@/lib/institution-state";
+import { clearSimVenues } from "@/lib/venues";
 import { useSponsoredExecute } from "@/lib/sponsored";
 import type { OtcResult } from "@/lib/otc";
 import { MOCK_INCOMING_RFQS, MOCK_POSITIONS, positionPnl, type MockPosition } from "@/lib/mock";
@@ -35,6 +36,7 @@ export default function Dashboard() {
   const [otcOpen, setOtcOpen] = useState(false);
   const [loadOpen, setLoadOpen] = useState(false);
   const [makersBusy, setMakersBusy] = useState(false);
+  const [resetMsg, setResetMsg] = useState<string | null>(null);
   // unread RFQ-inbox badge: seeded with the standing incoming RFQs, bumped when
   // a broadcast RFQ draws quotes; cleared when the desk opens the tab.
   const [rfqUnread, setRfqUnread] = useState(MOCK_INCOMING_RFQS.length);
@@ -115,6 +117,26 @@ export default function Dashboard() {
     }
   }, [account, refresh]);
 
+  // Reset desk — LOCAL ONLY, zero transactions (nothing to fail): clears this
+  // account's browser records so onboarding reopens with a fresh desk. The old
+  // institution and its test funds simply stay parked on-chain.
+  function doResetDesk() {
+    if (!account || !rec) return;
+    const ok = window.confirm(
+      `Reset @${rec.handle}?\n\nClears this browser's records for the account and reopens onboarding — pick a NEW handle ("${rec.handle}" stays taken on-chain). The old institution's test funds stay parked on-chain; nothing is transacted.`,
+    );
+    if (!ok) return;
+    for (const rfqId of rec.rfqIds ?? []) {
+      localStorage.removeItem(`fullmetal:quotes:${rfqId}`);
+    }
+    clearSimVenues(rec.institutionId);
+    clearInstitution(account.address);
+    setResetMsg(`✓ Local records for @${rec.handle} cleared — create a fresh institution below with a new handle.`);
+    setRec(null);
+    setState(null);
+    setPositions([]);
+  }
+
   async function fund(amount: number) {
     if (!account || !rec) throw new Error("No institution.");
     const r = await fetch("/api/faucet", {
@@ -179,6 +201,11 @@ export default function Dashboard() {
       </header>
 
       <main className="mx-auto w-full max-w-[1320px] px-6 py-10 sm:px-10 lg:py-12">
+        {resetMsg && (
+          <p className="mb-6 rounded-[10px] border border-line-strong bg-surface px-4 py-3 text-[13px] leading-[1.6] text-ink">
+            {resetMsg}
+          </p>
+        )}
         {!mounted ? null : !account ? (
           <Empty title="Sign in to view your desk" cta={<Link href="/onboarding" className={linkCls}>Go to onboarding</Link>} />
         ) : !rec ? (
@@ -194,6 +221,13 @@ export default function Dashboard() {
                   <span className="flex items-center gap-1.5 text-ink"><span className="h-[6px] w-[6px] rounded-full bg-[#1f6f4d]" /> LIVE</span>
                   <span>@{rec.handle}</span>
                   <a href={explorer.object(rec.institutionId)} target="_blank" rel="noreferrer" className="underline hover:text-ink">inst {rec.institutionId.slice(0, 6)}… ↗</a>
+                  <button
+                    onClick={doResetDesk}
+                    title="Clear this account's local records and reopen onboarding (no transactions)"
+                    className="underline decoration-dotted underline-offset-2 hover:text-ink"
+                  >
+                    ↺ reset desk
+                  </button>
                 </div>
               </div>
               <div className="flex gap-2.5">
@@ -251,7 +285,16 @@ export default function Dashboard() {
                   <RehypoHero
                     instId={rec.institutionId}
                     state={state}
-                    otcIds={(rec.otcIds ?? []).filter((id) => positions.find((p) => p.otcId === id && (p.status ?? 0) === 0))}
+                    // arm only OPEN, UNEXPIRED contracts (settle_on_breach aborts
+                    // on expired ones — those settle via close)
+                    otcIds={(rec.otcIds ?? []).filter((id) =>
+                      positions.find(
+                        (p) =>
+                          p.otcId === id &&
+                          (p.status ?? 0) === 0 &&
+                          !((p.expiryMs ?? 0) > 0 && Date.now() >= (p.expiryMs ?? 0)),
+                      ),
+                    )}
                     onRefresh={() => sync(rec.institutionId)}
                   />
                 )}

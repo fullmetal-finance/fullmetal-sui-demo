@@ -7,13 +7,18 @@ import { DEEPBOOK, SPCX, SPCX_VOL, explorer, usd } from "@/lib/fullmetal";
 import type { InstState } from "@/lib/institution-state";
 import { readFloor, readSuppliedValue } from "@/lib/institution-state";
 import { cureCalls, oracleStatus, pushTick, resetOracle, triggerAndRecall, type OracleResult } from "@/lib/oracle";
+import { STATUS, VENUE_ACCENT } from "@/lib/palette";
 import { useRates } from "@/lib/rates";
 import { useRecall, useRehypothecate } from "@/lib/rehypo-actions";
-import { SCENARIOS, type Scenario, type ScenarioKey } from "@/lib/scenario";
+import { createMarketSim, type MarketEventKind, type MarketSim } from "@/lib/scenario";
 import { loadSimVenues, simDeposit, simValue, simWithdraw, simWithdrawAll, type SimVenues } from "@/lib/venues";
 import ScenarioChart, { type ChartEvent, type ChartPoint } from "./ScenarioChart";
 
 type Flow = -1 | 0 | 1;
+type VenueKey = "deepbook" | "suilend" | "navi";
+
+const WINDOW = 48; // rolling chart window (prints)
+const CADENCE_MS = 1500; // min gap between prints (tx latency usually dominates)
 
 export default function RehypoHero({
   instId,
@@ -23,8 +28,8 @@ export default function RehypoHero({
 }: {
   instId: string;
   state: InstState | null;
-  /** the desk's open contracts — armed into the crash ticks so the breach
-   *  crank fires while liquidity is out (margin call → cure → survive) */
+  /** the desk's OPEN, unexpired contracts — armed into crash ticks so the
+   *  breach crank fires while liquidity is out (margin call → cure → survive) */
   otcIds?: string[];
   onRefresh: () => void;
 }) {
@@ -33,26 +38,25 @@ export default function RehypoHero({
   const rates = useRates();
 
   // ---- live on-chain reads ----
-  const [supplied, setSupplied] = useState(0); // DeepBook position incl. interest
+  const [supplied, setSupplied] = useState(0);
   const [mark, setMarkState] = useState<number>(SPCX.initialMark);
   const [triggered, setTriggered] = useState(false);
   const [sigmaBps, setSigmaBps] = useState<number>(SPCX_VOL.seedSigmaBps);
   const [releaseProgress, setReleaseProgress] = useState(0);
-  const [floorInfo, setFloorInfo] = useState({ floor: 0, deployable: 0 });
+  const [floorInfo, setFloorInfo] = useState<{ floor: number; deployable: number } | null>(null);
 
   // ---- simulated venue legs (Suilend / Navi) ----
   const [sims, setSims] = useState<SimVenues>({ suilend: null, navi: null });
 
-  // ---- scenario player + chart ----
-  const [scenarioKey, setScenarioKey] = useState<ScenarioKey>("flash-crash");
-  const [autoCure, setAutoCure] = useState(true);
+  // ---- live market + chart ----
   const [running, setRunning] = useState(false);
+  const [autoCure, setAutoCure] = useState(true);
   const [points, setPoints] = useState<ChartPoint[]>([]);
   const [chartEvents, setChartEvents] = useState<ChartEvent[]>([]);
-  const [frameTicks, setFrameTicks] = useState(0);
   const stopRef = useRef(false);
-  // mirror of `points` for the async tick loop (setState updaters must stay pure)
-  const pointsRef = useRef<ChartPoint[]>([]);
+  const pointsRef = useRef<ChartPoint[]>([]); // async loop's mirror (updaters stay pure)
+  const marketRef = useRef<MarketSim | null>(null);
+  const phaseRef = useRef<"idle" | "called">("idle"); // margin-call cycle state
 
   // ---- ux ----
   const [busy, setBusy] = useState<string | null>(null);
@@ -63,8 +67,6 @@ export default function RehypoHero({
   const [amounts, setAmounts] = useState<Record<string, number | "">>({});
   const [spikePrice, setSpikePrice] = useState<number>(SPCX.spikeMark);
 
-  const scenario = SCENARIOS.find((s) => s.key === scenarioKey) ?? SCENARIOS[0];
-
   const aprs = {
     deepbook: rates?.rates.deepbook ?? 4.0,
     suilend: rates?.rates.suilend ?? 5.1,
@@ -73,37 +75,41 @@ export default function RehypoHero({
 
   const liquid = state?.liquid ?? 0;
   const rehyp = state?.rehypothecated ?? 0; // real DeepBook principal
-  const reserved = state?.reserved ?? 0; // posted IM across contracts
+  const reserved = state?.reserved ?? 0;
   const suilendVal = simValue(sims.suilend, aprs.suilend);
   const naviVal = simValue(sims.navi, aprs.navi);
   const simTotal = suilendVal + naviVal;
   const totalDeployed = rehyp + simTotal;
-  // Deployable = whatever liquid treasury sits above the ON-CHAIN liquidity
-  // floor (max(stress, 25% of reserved IM) — the deploy tx aborts below it).
-  // Sim legs draw from the same UI budget so the picture stays coherent.
   const uiLiquid = Math.max(0, liquid - simTotal);
-  const floor = floorInfo.floor;
-  const deployable = Math.max(0, Math.floor(Math.max(0, floorInfo.deployable - simTotal) * 100) / 100);
+  // On-chain floor (25% of reserved IM by default); client-side fallback if the
+  // read hasn't landed, so the deploy buttons are never dead while loading.
+  const floor = floorInfo?.floor ?? reserved * 0.25;
+  const chainDeployable = floorInfo?.deployable ?? Math.max(0, liquid - reserved * 0.25);
+  const deepbookMax = Math.floor(Math.max(0, Math.min(uiLiquid, chainDeployable - simTotal)) * 100) / 100;
+  const simMax = Math.floor(Math.max(0, uiLiquid - floor) * 100) / 100;
   const pool = uiLiquid + totalDeployed;
   const pctDeployed = pool > 0 ? Math.min(1, totalDeployed / pool) : 0;
   const interest = Math.max(0, supplied - rehyp);
 
   const pushPct = mark > 0 ? ((spikePrice - mark) / mark) * 100 : 0;
-  // live latch threshold: min(4σ z-latch, legacy 15% jump)
   const latchPct = Math.min((SPCX_VOL.zLatchX100 / 100) * (sigmaBps / 100), SPCX.triggerPct);
   const willTrigger = Math.abs(pushPct) >= latchPct;
 
   const poll = useCallback(async () => {
     try {
-      const [sv, oc, fl] = await Promise.all([readSuppliedValue(instId), oracleStatus(), readFloor(instId)]);
+      const [sv, oc] = await Promise.all([readSuppliedValue(instId), oracleStatus()]);
       setSupplied(sv);
       setMarkState(oc.mark);
       setTriggered(oc.triggered);
       setSigmaBps(oc.sigmaBps);
       setReleaseProgress(oc.releaseProgress);
-      setFloorInfo(fl);
     } catch {
       /* transient */
+    }
+    try {
+      setFloorInfo(await readFloor(instId));
+    } catch {
+      /* keep fallback */
     }
   }, [instId]);
 
@@ -116,7 +122,7 @@ export default function RehypoHero({
     return () => clearInterval(t);
   }, [poll, instId, running]);
 
-  /** Shared recall/release side-effects for scenario ticks AND manual pushes. */
+  /** Shared per-print side-effects for market ticks AND manual pushes. */
   const applyTickResult = useCallback(
     async (r: OracleResult, wasTriggered: boolean, recalledRef: { deepbook: number; suilend: number; navi: number }) => {
       const point: ChartPoint = {
@@ -134,8 +140,7 @@ export default function RehypoHero({
       setReleaseProgress(r.releaseProgress);
 
       if (r.recalled) {
-        // real DeepBook leg is back in the treasury; pull the sim legs too.
-        // Read sim values fresh from the store (React state may be stale here).
+        // real DeepBook leg is back; pull the sim legs too (read store fresh)
         const fresh = loadSimVenues(instId);
         const suilendPre = simValue(fresh.suilend, aprs.suilend);
         const naviPre = simValue(fresh.navi, aprs.navi);
@@ -159,7 +164,6 @@ export default function RehypoHero({
         const back = recalledRef.deepbook + recalledRef.suilend + recalledRef.navi;
         setChartEvents((es) => [...es, { tick: tickIndex, kind: "redeposit", amount: back }]);
         setBannerMsg({ tone: "green", text: `✓ VOLATILITY SUBSIDED ON-CHAIN (${SPCX_VOL.releaseNeeded} CALM PRINTS) · REDEPOSITING ${usd(back)}` });
-        // real leg: the desk's own sponsored redeposit
         if (recalledRef.deepbook > 0) {
           try {
             const d = await rehypothecate(Math.floor(recalledRef.deepbook * 100) / 100);
@@ -168,7 +172,6 @@ export default function RehypoHero({
             setError(e instanceof Error ? e.message : String(e));
           }
         }
-        // sim legs (simDeposit reads the store fresh internally)
         if (recalledRef.suilend > 0) simDeposit(instId, "suilend", recalledRef.suilend, aprs.suilend);
         if (recalledRef.navi > 0) simDeposit(instId, "navi", recalledRef.navi, aprs.navi);
         setSims(loadSimVenues(instId));
@@ -184,59 +187,7 @@ export default function RehypoHero({
     [instId, aprs.suilend, aprs.navi, rehypothecate, onRefresh],
   );
 
-  async function runScenario() {
-    if (running) {
-      stopRef.current = true;
-      return;
-    }
-    setError(null);
-    setBannerMsg(null);
-    setChartEvents([]);
-    pointsRef.current = [{ price: mark, sigmaBps, triggered, releaseProgress }];
-    setPoints(pointsRef.current);
-    setFrameTicks(scenario.prices.length + 1);
-    setRunning(true);
-    stopRef.current = false;
-    const recalledRef = { deepbook: 0, suilend: 0, navi: 0 };
-    const openOtcs = otcIds.length ? otcIds : undefined;
-    let wasTriggered = triggered;
-    let callsPending = false;
-    try {
-      for (const price of scenario.prices) {
-        if (stopRef.current) break;
-        const t0 = Date.now();
-        // with contracts armed, a latch tick cranks them FIRST (margin calls
-        // while liquidity is deployed) instead of auto-recalling
-        const r = await pushTick(instId, price, callsPending ? undefined : openOtcs);
-        await applyTickResult(r, wasTriggered, recalledRef);
-        wasTriggered = r.triggered;
-
-        if (r.marginCalls?.length && !callsPending) {
-          callsPending = true;
-          setBannerMsg({
-            tone: "red",
-            text: `⚠ MM BREACH → MARGIN CALL on ${r.marginCalls.length} position${r.marginCalls.length > 1 ? "s" : ""} · pooled funds are deployed · cure window running`,
-          });
-          onRefresh();
-          await new Promise((res) => setTimeout(res, 2600));
-          if (autoCure && !stopRef.current) {
-            const cu = await cureCalls(instId, otcIds);
-            await applyCure(cu, recalledRef);
-            wasTriggered = cu.triggered;
-          }
-        }
-        const wait = scenario.cadenceMs - (Date.now() - t0);
-        if (wait > 0) await new Promise((res) => setTimeout(res, wait));
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setRunning(false);
-      stopRef.current = false;
-    }
-  }
-
-  /** Cure-step side effects: the recall event + "positions survive" banner. */
+  /** Cure-step side effects: recall event + "positions survive" banner. */
   async function applyCure(cu: OracleResult, recalledRef: { deepbook: number; suilend: number; navi: number }) {
     const tickIndex = pointsRef.current.length - 1;
     if (cu.recalled) {
@@ -265,9 +216,70 @@ export default function RehypoHero({
     setTimeout(() => setBannerMsg(null), 4000);
   }
 
+  // ---- the live market loop ----
+  async function toggleMarket() {
+    if (running) {
+      stopRef.current = true;
+      return;
+    }
+    setError(null);
+    setBannerMsg(null);
+    marketRef.current = createMarketSim(mark);
+    phaseRef.current = "idle";
+    setRunning(true);
+    stopRef.current = false;
+    const recalledRef = { deepbook: 0, suilend: 0, navi: 0 };
+    let wasTriggered = triggered;
+    try {
+      while (!stopRef.current) {
+        const t0 = Date.now();
+        const price = marketRef.current.next();
+        // arm the desk's contracts only while no call is pending, so the crash
+        // tick cranks them (margin calls) instead of silently auto-recalling
+        const arm = phaseRef.current === "idle" && otcIds.length ? otcIds : undefined;
+        const r = await pushTick(instId, price, arm);
+        const released = await applyTickResult(r, wasTriggered, recalledRef);
+        wasTriggered = r.triggered;
+        if (released) phaseRef.current = "idle"; // cycle complete — next crash can call again
+
+        const calls = (r.marginCalls ?? []).filter((m) => m.deadline != null);
+        if (calls.length && phaseRef.current === "idle") {
+          phaseRef.current = "called";
+          setBannerMsg({
+            tone: "red",
+            text: `⚠ MM BREACH → MARGIN CALL on ${calls.length} position${calls.length > 1 ? "s" : ""} · pooled funds are deployed · cure window running`,
+          });
+          onRefresh();
+          await new Promise((res) => setTimeout(res, 2600));
+          if (autoCure && !stopRef.current) {
+            const cu = await cureCalls(instId, otcIds);
+            await applyCure(cu, recalledRef);
+            wasTriggered = cu.triggered;
+          }
+        }
+        const wait = CADENCE_MS - (Date.now() - t0);
+        if (wait > 0) await new Promise((res) => setTimeout(res, wait));
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRunning(false);
+      stopRef.current = false;
+    }
+  }
+
+  function inject(kind: MarketEventKind) {
+    marketRef.current?.inject(kind);
+    if (kind !== "calm") {
+      setBannerMsg({ tone: "red", text: kind === "crash" ? "💥 CRASH INCOMING — next print gaps −18…22%" : "▲ SQUEEZE INCOMING — next print gaps +18…23%" });
+      setTimeout(() => setBannerMsg(null), 1800);
+    }
+  }
+
   async function doReset() {
     setError(null);
     setBusy("reset");
+    stopRef.current = true;
     try {
       const r = await resetOracle();
       setMarkState(r.mark);
@@ -277,8 +289,8 @@ export default function RehypoHero({
       pointsRef.current = [];
       setPoints([]);
       setChartEvents([]);
-      setFrameTicks(0);
       setBannerMsg(null);
+      phaseRef.current = "idle";
       await poll();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -287,7 +299,7 @@ export default function RehypoHero({
     }
   }
 
-  // manual push — same on-chain machinery, one print at a time
+  // manual push — same machinery, one print at a time
   const manualRecalledRef = useRef({ deepbook: 0, suilend: 0, navi: 0 });
   async function doPush() {
     if (!Number.isFinite(spikePrice) || spikePrice <= 0) return;
@@ -296,7 +308,6 @@ export default function RehypoHero({
     try {
       const wasTriggered = triggered;
       const r = willTrigger && !triggered ? await triggerAndRecall(instId, spikePrice) : await pushTick(instId, spikePrice);
-      if (!points.length) setFrameTicks(0); // data-driven frame in manual mode
       await applyTickResult(r, wasTriggered, manualRecalledRef.current);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -307,9 +318,17 @@ export default function RehypoHero({
   }
 
   // ---- per-venue deploy / recall (DeepBook real; Suilend/Navi sim) ----
-  async function venueDeploy(venue: "deepbook" | "suilend" | "navi") {
-    const amt = Math.min(Number(amounts[venue]) || deployable, deployable);
-    if (!state || amt <= 0) return;
+  async function venueDeploy(venue: VenueKey) {
+    const max = venue === "deepbook" ? deepbookMax : simMax;
+    const amt = Math.min(Number(amounts[venue]) || max, max);
+    if (!state) return setError("Treasury state is still loading — try again in a second.");
+    if (amt <= 0) {
+      return setError(
+        venue === "deepbook"
+          ? `Nothing deployable to DeepBook: liquid ${usd(uiLiquid)}, on-chain floor ${usd(floor)} (deploys below the floor abort).`
+          : `Nothing deployable: liquid ${usd(uiLiquid)} minus the ${usd(floor)} liquidity floor leaves ${usd(simMax)}. Fund the treasury or recall from a venue.`,
+      );
+    }
     setError(null);
     setBusy(`d-${venue}`);
     setFlow(1);
@@ -331,10 +350,11 @@ export default function RehypoHero({
     }
   }
 
-  async function venueRecall(venue: "deepbook" | "suilend" | "navi") {
+  async function venueRecall(venue: VenueKey) {
     const inVenue = venue === "deepbook" ? rehyp : venue === "suilend" ? suilendVal : naviVal;
     const amt = Math.min(Number(amounts[venue]) || inVenue, inVenue);
-    if (!state || amt <= 0) return;
+    if (!state) return setError("Treasury state is still loading — try again in a second.");
+    if (amt <= 0) return setError(`Nothing to recall from ${venue} — its balance is ${usd(inVenue)}.`);
     setError(null);
     setBusy(`r-${venue}`);
     setFlow(-1);
@@ -356,12 +376,15 @@ export default function RehypoHero({
     }
   }
 
+  const windowPoints = points.slice(-WINDOW);
+  const startTick = points.length - windowPoints.length;
+
   return (
     <section className="relative mt-6 overflow-hidden rounded-[16px] border border-line-strong bg-surface">
       {bannerMsg && (
         <div
           className="fm-banner-in absolute inset-x-0 top-0 z-10 flex items-center justify-center gap-3 py-2.5 text-[13px] font-semibold tracking-[0.06em] text-bg"
-          style={{ background: bannerMsg.tone === "green" ? "#1f6f4d" : "#b4341f" }}
+          style={{ background: bannerMsg.tone === "green" ? STATUS.green : STATUS.red }}
         >
           {bannerMsg.text}
         </div>
@@ -380,76 +403,85 @@ export default function RehypoHero({
         </div>
         <div className="flex items-center gap-5">
           <span className="font-mono text-[12px] text-muted">
-            EWMA σ <span className="font-semibold text-ink">{sigmaBps} bps</span>
+            EWMA σ <span className="font-semibold" style={{ color: "#7a5cd6" }}>{sigmaBps} bps</span>
           </span>
           {triggered && (
-            <span className="font-mono text-[12px] font-semibold" style={{ color: "#b4341f" }}>
+            <span className="font-mono text-[12px] font-semibold" style={{ color: STATUS.red }}>
               LATCHED · release {releaseProgress}/{SPCX_VOL.releaseNeeded}
             </span>
           )}
           <div className="text-right">
             <div className="flex items-center justify-end gap-2">
               <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted">{SPCX.symbol}</span>
-              <span className={`fm-pulse h-[6px] w-[6px] rounded-full ${triggered ? "bg-[#b4341f]" : "bg-[#1f6f4d]"}`} />
+              <span className={`fm-pulse h-[6px] w-[6px] rounded-full`} style={{ background: triggered ? STATUS.red : STATUS.green }} />
             </div>
             <div className="font-mono text-[22px] font-semibold text-ink">{usd(mark)}</div>
           </div>
         </div>
       </div>
 
-      {/* scenario player + chart */}
+      {/* live market controls + chart */}
       <div className="border-b border-line px-6 py-5">
-        <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
-          <div className="flex items-end gap-2">
-            <label className="flex flex-col gap-1">
-              <span className="text-[10px] font-medium uppercase tracking-[0.09em] text-muted">Oracle scenario</span>
-              <select
-                value={scenarioKey}
-                onChange={(e) => setScenarioKey(e.target.value as ScenarioKey)}
-                disabled={running}
-                className="rounded-[7px] border border-line-strong bg-surface px-3 py-2 text-[13px] font-medium text-ink outline-none"
-              >
-                {SCENARIOS.map((s) => (
-                  <option key={s.key} value={s.key}>{s.label}</option>
-                ))}
-              </select>
-            </label>
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2">
             <button
-              onClick={runScenario}
+              onClick={toggleMarket}
               disabled={!!busy}
               className={`rounded-[7px] border px-4 py-2 text-[13px] font-semibold transition-colors disabled:opacity-40 ${
-                running ? "border-[#b4341f] text-[#b4341f] hover:bg-[#b4341f]/10" : "border-line-strong bg-ink text-bg hover:opacity-90"
+                running ? "border-line-strong text-ink hover:bg-bg" : "border-line-strong bg-ink text-bg hover:opacity-90"
               }`}
             >
-              {running ? "■ Stop" : "▶ Run scenario"}
+              {running ? "■ Stop market" : "▶ Start live market"}
+            </button>
+            <button
+              onClick={() => inject("crash")}
+              disabled={!running}
+              className="rounded-[7px] border px-3.5 py-2 text-[13px] font-semibold transition-colors disabled:opacity-30"
+              style={{ borderColor: STATUS.red, color: STATUS.red }}
+            >
+              💥 Crash
+            </button>
+            <button
+              onClick={() => inject("spike")}
+              disabled={!running}
+              className="rounded-[7px] border border-line-strong px-3.5 py-2 text-[13px] font-semibold text-ink transition-colors hover:bg-bg disabled:opacity-30"
+            >
+              ▲ Spike
+            </button>
+            <button
+              onClick={() => inject("calm")}
+              disabled={!running}
+              className="rounded-[7px] border border-line-strong px-3.5 py-2 text-[13px] font-semibold transition-colors hover:bg-bg disabled:opacity-30"
+              style={{ color: STATUS.green }}
+            >
+              ≈ Calm
             </button>
             <button
               onClick={doReset}
               disabled={!!busy || running}
-              className="rounded-[7px] border border-line-strong px-4 py-2 text-[13px] font-semibold text-ink transition-colors hover:bg-bg disabled:opacity-40"
+              className="rounded-[7px] border border-line-strong px-3.5 py-2 text-[13px] font-semibold text-ink transition-colors hover:bg-bg disabled:opacity-40"
             >
               {busy === "reset" ? "…" : "Reset"}
             </button>
             {otcIds.length > 0 && (
-              <label className="ml-1 flex cursor-pointer items-center gap-1.5 pb-2 text-[11px] text-muted" title="On a margin call, run the permissionless recall + re-crank so positions pay and survive. Untick to let the cure window run out (liquidation drill).">
+              <label className="ml-1 flex cursor-pointer items-center gap-1.5 text-[11px] text-muted" title="On a margin call, run the permissionless recall + re-crank so positions pay and survive. Untick to let the cure window run out (liquidation drill).">
                 <input type="checkbox" checked={autoCure} onChange={(e) => setAutoCure(e.target.checked)} className="accent-[#0f0f0f]" />
                 auto-cure margin calls
               </label>
             )}
           </div>
-          <p className="max-w-[360px] text-right text-[11px] leading-[1.5] text-muted">{scenario.blurb}. Every print is a real on-chain
-            push; the recall is permissionless, the release is the oracle&apos;s own {SPCX_VOL.releaseNeeded}-print hysteresis.</p>
+          <p className="max-w-[330px] text-right text-[11px] leading-[1.5] text-muted">
+            A live feed — every print is a real on-chain push. Hit 💥 mid-stream: the σ latch fires, positions get margin-called,
+            the permissionless recall cures them; when the market calms, the {SPCX_VOL.releaseNeeded}-print hysteresis releases and margin redeposits.
+          </p>
         </div>
-        {points.length > 0 ? (
-          <ScenarioChart
-            points={points}
-            events={chartEvents}
-            totalTicks={frameTicks || points.length + 1}
-            frame={frameTicks ? { priceMin: Math.min(...scenario.prices, mark), priceMax: Math.max(...scenario.prices, mark) } : undefined}
-          />
+        {windowPoints.length > 0 ? (
+          <ScenarioChart points={windowPoints} events={chartEvents} startTick={startTick} minSlots={Math.min(WINDOW, Math.max(24, windowPoints.length))} />
         ) : (
           <div className="flex h-[120px] items-center justify-center rounded-[10px] border border-dashed border-line-strong">
-            <p className="font-mono text-[12px] text-muted">▶ Run a scenario — the SPCX print stream, the EWMA σ signal, and the recall/redeposit marks draw here live.</p>
+            <p className="px-4 text-center font-mono text-[12px] text-muted">
+              ▶ Start the live market — the price feed and the EWMA σ signal stream here; then hit 💥 Crash and watch the recall fire.
+            </p>
           </div>
         )}
       </div>
@@ -476,51 +508,9 @@ export default function RehypoHero({
 
       {/* per-venue cards */}
       <div className="grid gap-3 px-6 pb-5 sm:grid-cols-3">
-        <VenueCard
-          venue="deepbook"
-          name="DeepBook margin"
-          logo="/logos/deepbook.png"
-          badge="real · testnet"
-          badgeTone="green"
-          value={rehyp}
-          apr={aprs.deepbook}
-          live={rates?.live.deepbook}
-          amounts={amounts}
-          setAmounts={setAmounts}
-          busy={busy}
-          onDeploy={() => venueDeploy("deepbook")}
-          onRecall={() => venueRecall("deepbook")}
-        />
-        <VenueCard
-          venue="suilend"
-          name="Suilend"
-          logo="/logos/suilend.png"
-          badge="sim · live mainnet APR"
-          badgeTone="muted"
-          value={suilendVal}
-          apr={aprs.suilend}
-          live={rates?.live.suilend}
-          amounts={amounts}
-          setAmounts={setAmounts}
-          busy={busy}
-          onDeploy={() => venueDeploy("suilend")}
-          onRecall={() => venueRecall("suilend")}
-        />
-        <VenueCard
-          venue="navi"
-          name="Navi"
-          logo="/logos/navi.png"
-          badge="sim · live mainnet APR"
-          badgeTone="muted"
-          value={naviVal}
-          apr={aprs.navi}
-          live={rates?.live.navi}
-          amounts={amounts}
-          setAmounts={setAmounts}
-          busy={busy}
-          onDeploy={() => venueDeploy("navi")}
-          onRecall={() => venueRecall("navi")}
-        />
+        <VenueCard venue="deepbook" name="DeepBook margin" logo="/logos/deepbook.png" badge="real · testnet" value={rehyp} share={totalDeployed > 0 ? rehyp / totalDeployed : 0} apr={aprs.deepbook} max={deepbookMax} amounts={amounts} setAmounts={setAmounts} busy={busy} onDeploy={() => venueDeploy("deepbook")} onRecall={() => venueRecall("deepbook")} />
+        <VenueCard venue="suilend" name="Suilend" logo="/logos/suilend.png" badge="sim · live mainnet APR" value={suilendVal} share={totalDeployed > 0 ? suilendVal / totalDeployed : 0} apr={aprs.suilend} max={simMax} amounts={amounts} setAmounts={setAmounts} busy={busy} onDeploy={() => venueDeploy("suilend")} onRecall={() => venueRecall("suilend")} />
+        <VenueCard venue="navi" name="Navi" logo="/logos/navi.png" badge="sim · live mainnet APR" value={naviVal} share={totalDeployed > 0 ? naviVal / totalDeployed : 0} apr={aprs.navi} max={simMax} amounts={amounts} setAmounts={setAmounts} busy={busy} onDeploy={() => venueDeploy("navi")} onRecall={() => venueRecall("navi")} />
       </div>
 
       {/* deploy gauge + on-chain liquidity floor */}
@@ -528,11 +518,11 @@ export default function RehypoHero({
         <div className="relative h-[6px] w-full overflow-hidden rounded-full bg-[rgba(0,0,0,0.07)]">
           <div
             className="absolute inset-y-0 left-0 rounded-full transition-[width] duration-700"
-            style={{ width: `${pctDeployed * 100}%`, background: flow === -1 ? "#b4341f" : "var(--color-ink)" }}
+            style={{ width: `${pctDeployed * 100}%`, background: flow === -1 ? STATUS.red : "#2456c4" }}
           />
         </div>
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2 font-mono text-[11px] tracking-[0.08em] text-muted">
-          <span>{Math.round(pctDeployed * 100)}% OF TREASURY EARNING · DEPLOYABLE {usd(deployable)}</span>
+          <span>{Math.round(pctDeployed * 100)}% OF TREASURY EARNING · DEPLOYABLE {usd(deepbookMax)}</span>
           <span>
             LIQUIDITY FLOOR {usd(floor)} <span className="text-faint">· deploys abort below it, on-chain</span>
           </span>
@@ -541,7 +531,7 @@ export default function RehypoHero({
 
       {/* provenance */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line px-6 py-3 font-mono text-[11px] text-muted">
-        <span className="text-[#1f6f4d]">● DeepBook leg real on testnet</span>
+        <span style={{ color: STATUS.green }}>● DeepBook leg real on testnet</span>
         <span>● Suilend/Navi legs simulated · PTBs validated on mainnet</span>
         {lastDigest && (
           <a href={explorer.tx(lastDigest)} target="_blank" rel="noreferrer" className="underline hover:text-ink">
@@ -560,25 +550,26 @@ export default function RehypoHero({
           <button
             onClick={doPush}
             disabled={!!busy || running}
-            className={`rounded-[7px] border px-4 py-2.5 text-[13px] font-semibold transition-colors disabled:opacity-40 ${willTrigger ? "border-[#b4341f] text-[#b4341f] hover:bg-[#b4341f] hover:text-bg" : "border-line-strong text-ink hover:bg-surface"}`}
+            className={`rounded-[7px] border px-4 py-2.5 text-[13px] font-semibold transition-colors disabled:opacity-40 ${willTrigger ? "hover:text-bg" : "border-line-strong text-ink hover:bg-surface"}`}
+            style={willTrigger ? { borderColor: STATUS.red, color: STATUS.red } : undefined}
           >
             {busy === "push" ? "…" : "Push print →"}
           </button>
         </div>
         <p className="font-mono text-[11px] leading-[1.5]">
-          <span className={willTrigger ? "font-semibold text-[#b4341f]" : "text-muted"}>
+          <span className={willTrigger ? "font-semibold" : "text-muted"} style={willTrigger ? { color: STATUS.red } : undefined}>
             Δ {pushPct >= 0 ? "+" : ""}{pushPct.toFixed(1)}% vs {usd(mark)}
           </span>
           <span className="text-muted"> · latches beyond ±{latchPct.toFixed(1)}% (z &gt; {(SPCX_VOL.zLatchX100 / 100).toFixed(0)}σ at current σ) · </span>
           {willTrigger ? (
-            <span className="text-[#b4341f]">would latch → permissionless recall</span>
+            <span style={{ color: STATUS.red }}>would latch → permissionless recall</span>
           ) : (
             <span className="text-muted">in band{triggered ? ` → counts toward on-chain release (${releaseProgress}/${SPCX_VOL.releaseNeeded})` : ""}</span>
           )}
         </p>
       </div>
 
-      {error && <p className="break-words px-6 pb-4 text-[12px] text-[#b4341f]">{error}</p>}
+      {error && <p className="break-words px-6 pb-4 text-[12px]" style={{ color: STATUS.red }}>{error}</p>}
     </section>
   );
 }
@@ -588,55 +579,60 @@ function VenueCard({
   name,
   logo,
   badge,
-  badgeTone,
   value,
+  share,
   apr,
-  live,
+  max,
   amounts,
   setAmounts,
   busy,
   onDeploy,
   onRecall,
 }: {
-  venue: "deepbook" | "suilend" | "navi";
+  venue: VenueKey;
   name: string;
   logo: string;
   badge: string;
-  badgeTone: "green" | "muted";
   value: number;
+  share: number; // of total deployed
   apr: number;
-  live?: boolean;
+  max: number; // deployable into this venue right now
   amounts: Record<string, number | "">;
   setAmounts: React.Dispatch<React.SetStateAction<Record<string, number | "">>>;
   busy: string | null;
   onDeploy: () => void;
   onRecall: () => void;
 }) {
+  const accent = VENUE_ACCENT[venue];
+  const real = venue === "deepbook";
   return (
-    <div className="rounded-[12px] border border-line-strong bg-bg p-4">
+    <div className="rounded-[12px] border border-line-strong bg-bg p-4" style={{ borderTop: `3px solid ${accent}` }}>
       <div className="flex items-center justify-between">
         <span className="flex items-center gap-2">
           <Image src={logo} alt="" width={18} height={18} className="rounded-[4px]" />
           <span className="text-[13px] font-semibold text-ink">{name}</span>
         </span>
         <span
-          className={`rounded-[4px] px-1.5 py-0.5 font-mono text-[9.5px] font-semibold uppercase tracking-[0.06em] ${
-            badgeTone === "green" ? "bg-[#1f6f4d]/12 text-[#1a6042]" : "bg-[rgba(0,0,0,0.06)] text-muted"
-          }`}
+          className="rounded-[4px] px-1.5 py-0.5 font-mono text-[9.5px] font-semibold uppercase tracking-[0.06em]"
+          style={real ? { background: "rgba(31,111,77,0.12)", color: "#1a6042" } : { background: "rgba(0,0,0,0.06)", color: "var(--color-muted)" }}
         >
           {badge}
         </span>
       </div>
       <div className="mt-3 flex items-baseline justify-between">
         <span className="font-mono text-[19px] font-semibold text-ink">{usd(value)}</span>
-        <span className="font-mono text-[12px] font-semibold text-[#1a6042]">
-          {apr.toFixed(2)}%{live === false ? "*" : ""} APR
+        <span className="font-mono text-[12px] font-semibold" style={{ color: "#1a6042" }}>
+          {apr.toFixed(2)}% APR
         </span>
+      </div>
+      {/* share of deployed capital, in the venue's accent */}
+      <div className="mt-2 h-[5px] w-full overflow-hidden rounded-full bg-[rgba(0,0,0,0.07)]">
+        <div className="h-full rounded-full transition-[width] duration-500" style={{ width: `${Math.round(share * 100)}%`, background: accent }} />
       </div>
       <div className="mt-3 flex items-center gap-1.5">
         <input
           type="number"
-          placeholder="amount"
+          placeholder={max > 0 ? `max ${Math.floor(max)}` : "amount"}
           value={amounts[venue] ?? ""}
           onChange={(e) => {
             const v = e.target.value === "" ? "" : +e.target.value;
@@ -647,7 +643,8 @@ function VenueCard({
         <button
           onClick={onDeploy}
           disabled={!!busy}
-          className="shrink-0 rounded-[6px] border border-line-strong bg-ink px-2.5 py-1.5 text-[11.5px] font-semibold text-bg hover:opacity-90 disabled:opacity-40"
+          className="shrink-0 rounded-[6px] px-2.5 py-1.5 text-[11.5px] font-semibold text-white hover:opacity-90 disabled:opacity-40"
+          style={{ background: accent }}
         >
           {busy === `d-${venue}` ? "…" : "Deploy"}
         </button>
@@ -678,8 +675,8 @@ function Vessel({
   tone: "ink" | "green";
   subGreen?: boolean;
 }) {
-  const edge = tone === "green" ? "#1f6f4d" : "var(--color-ink)";
-  const fill = tone === "green" ? "rgba(31,111,77,0.12)" : "rgba(15,15,15,0.07)";
+  const edge = tone === "green" ? STATUS.green : "#2456c4";
+  const fill = tone === "green" ? "rgba(31,111,77,0.12)" : "rgba(36,86,196,0.10)";
   return (
     <div className="relative flex min-h-[130px] flex-col justify-between overflow-hidden rounded-[12px] border border-line-strong bg-bg p-5">
       <div
@@ -691,7 +688,7 @@ function Vessel({
       </div>
       <div className="relative">
         <p className="font-mono text-[24px] font-semibold text-ink">{big}</p>
-        <p className={`font-mono text-[12px] ${subGreen ? "text-[#1f6f4d]" : "text-muted"}`}>{sub}</p>
+        <p className="font-mono text-[12px]" style={{ color: subGreen ? STATUS.green : "var(--color-muted)" }}>{sub}</p>
       </div>
     </div>
   );
@@ -699,26 +696,17 @@ function Vessel({
 
 function Conduit({ flow }: { flow: Flow }) {
   const cls = flow === 1 ? "fm-flow-right" : flow === -1 ? "fm-flow-left" : "";
-  const color = flow === -1 ? "#b4341f" : "var(--color-ink)";
+  const color = flow === -1 ? STATUS.red : "#2456c4";
   const caption = flow === 1 ? "DEPLOYING →" : flow === -1 ? "◄ RECALL" : "IDLE";
   return (
     <div className="flex w-[120px] flex-col items-center justify-center px-2">
       <svg width="120" height="40" viewBox="0 0 120 40" aria-hidden>
         <line x1="4" y1="20" x2="116" y2="20" stroke="var(--color-line-strong)" strokeWidth="1" />
         {flow !== 0 && (
-          <line
-            x1="4"
-            y1="20"
-            x2="116"
-            y2="20"
-            stroke={color}
-            strokeWidth="2.5"
-            strokeDasharray="6 10"
-            className={cls}
-          />
+          <line x1="4" y1="20" x2="116" y2="20" stroke={color} strokeWidth="2.5" strokeDasharray="6 10" className={cls} />
         )}
       </svg>
-      <span className="font-mono text-[10px] tracking-[0.12em]" style={{ color: flow === -1 ? "#b4341f" : "var(--color-muted)" }}>
+      <span className="font-mono text-[10px] tracking-[0.12em]" style={{ color: flow === -1 ? STATUS.red : "var(--color-muted)" }}>
         {caption}
       </span>
     </div>
