@@ -5,13 +5,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DEEPBOOK, SPCX, SPCX_VOL, explorer, usd } from "@/lib/fullmetal";
 import type { InstState } from "@/lib/institution-state";
-import { readFloor, readSuppliedValue } from "@/lib/institution-state";
-import { cureCalls, oracleStatus, pushTick, resetOracle, triggerAndRecall, type OracleResult } from "@/lib/oracle";
+import { readFloor, readInstitution, readSuppliedValue } from "@/lib/institution-state";
+import { cureCalls, friendlyMoveError, oracleStatus, pushTick, resetOracle, triggerAndRecall, type OracleResult } from "@/lib/oracle";
 import { STATUS, VENUE_ACCENT } from "@/lib/palette";
 import { useRates } from "@/lib/rates";
 import { useRecall, useRehypothecate } from "@/lib/rehypo-actions";
 import { createMarketSim, type MarketEventKind, type MarketSim } from "@/lib/scenario";
-import { loadSimVenues, simDeposit, simValue, simWithdraw, simWithdrawAll, type SimVenues } from "@/lib/venues";
+import { loadSimVenues, simAccrued, simDeposit, simValue, simWithdraw, simWithdrawAll, type SimVenues } from "@/lib/venues";
 import ScenarioChart, { type ChartEvent, type ChartPoint } from "./ScenarioChart";
 
 type Flow = -1 | 0 | 1;
@@ -46,7 +46,7 @@ export default function RehypoHero({
   const [floorInfo, setFloorInfo] = useState<{ floor: number; deployable: number } | null>(null);
 
   // ---- simulated venue legs (Suilend / Navi) ----
-  const [sims, setSims] = useState<SimVenues>({ suilend: null, navi: null });
+  const [sims, setSims] = useState<SimVenues>({ suilend: null, navi: null, cashOut: 0 });
 
   // ---- live market + chart ----
   const [running, setRunning] = useState(false);
@@ -57,6 +57,7 @@ export default function RehypoHero({
   const pointsRef = useRef<ChartPoint[]>([]); // async loop's mirror (updaters stay pure)
   const marketRef = useRef<MarketSim | null>(null);
   const phaseRef = useRef<"idle" | "called">("idle"); // margin-call cycle state
+  const wakeRef = useRef<(() => void) | null>(null); // inject() skips the cadence wait
 
   // ---- ux ----
   const [busy, setBusy] = useState<string | null>(null);
@@ -66,6 +67,9 @@ export default function RehypoHero({
   const [error, setError] = useState<string | null>(null);
   const [amounts, setAmounts] = useState<Record<string, number | "">>({});
   const [spikePrice, setSpikePrice] = useState<number>(SPCX.spikeMark);
+  const [rebFrom, setRebFrom] = useState<VenueKey>("deepbook");
+  const [rebTo, setRebTo] = useState<VenueKey>("suilend");
+  const [rebAmt, setRebAmt] = useState<number | "">("");
 
   const aprs = {
     deepbook: rates?.rates.deepbook ?? 4.0,
@@ -80,16 +84,43 @@ export default function RehypoHero({
   const naviVal = simValue(sims.navi, aprs.navi);
   const simTotal = suilendVal + naviVal;
   const totalDeployed = rehyp + simTotal;
-  const uiLiquid = Math.max(0, liquid - simTotal);
+  // The sims hold `cashOut` of the real liquid (their COST BASIS, not their
+  // live value): interest accrues inside the venue value without draining
+  // liquid, and withdrawn interest lands back in liquid — every dollar of
+  // uiLiquid + deployed reconciles to on-chain equity + unrealised interest.
+  const uiLiquid = Math.max(0, liquid - sims.cashOut);
   // On-chain floor (25% of reserved IM by default); client-side fallback if the
   // read hasn't landed, so the deploy buttons are never dead while loading.
   const floor = floorInfo?.floor ?? reserved * 0.25;
   const chainDeployable = floorInfo?.deployable ?? Math.max(0, liquid - reserved * 0.25);
-  const deepbookMax = Math.floor(Math.max(0, Math.min(uiLiquid, chainDeployable - simTotal)) * 100) / 100;
-  const simMax = Math.floor(Math.max(0, uiLiquid - floor) * 100) / 100;
+  // POLICY: only the LOCKED margin is rehypothecated. Free liquidity — the
+  // VM/PnL buffer the institution reloads daily — never leaves the treasury
+  // (routing all liquidity before the risk controls mature is a hack magnet).
+  const imIdle = Math.max(0, reserved - totalDeployed); // locked IM not yet at a venue
+  const deepbookMax = Math.floor(Math.max(0, Math.min(imIdle, chainDeployable)) * 100) / 100;
+  const simMax = Math.floor(Math.max(0, Math.min(imIdle, uiLiquid - floor)) * 100) / 100;
   const pool = uiLiquid + totalDeployed;
-  const pctDeployed = pool > 0 ? Math.min(1, totalDeployed / pool) : 0;
+  const pctDeployed = reserved > 0 ? Math.min(1, totalDeployed / reserved) : 0;
   const interest = Math.max(0, supplied - rehyp);
+  // deployed above the current locked IM — legal on-chain (deploys predate the
+  // IM-only policy, or contracts since closed released their IM) but out of
+  // policy NOW; the UI must show it or "locked $20 / deployed $40" reads broken
+  const overDeployed = Math.max(0, totalDeployed - reserved);
+
+  // WHY each venue's deploy cap is what it is — rendered on the card itself so
+  // a $0 max is never a silent contradiction of "IM is deployable"
+  function capReason(venue: VenueKey): string {
+    if (triggered) return `risk latch active — deploys freeze until release (auto-recalled otherwise)`;
+    if (reserved <= 0) return "no locked IM yet — open a contract; only locked margin deploys";
+    if (imIdle <= 0)
+      return overDeployed > 0.005
+        ? `all locked IM is out — incl. ${usd(overDeployed)} above policy (older deploys); Recall brings it home`
+        : "all locked IM is deployed — ⇄ Rebalance moves it between venues";
+    const m = venue === "deepbook" ? deepbookMax : simMax;
+    if (m <= 0) return `blocked by the on-chain floor: ${usd(floor)} must stay liquid, treasury holds ${usd(uiLiquid)} — recall or load funds`;
+    if (m < imIdle - 0.005) return `up to ${usd(m)} now — the floor keeps ${usd(floor)} liquid (of ${usd(imIdle)} undeployed IM)`;
+    return `up to ${usd(m)} — locked IM not yet deployed`;
+  }
 
   const pushPct = mark > 0 ? ((spikePrice - mark) / mark) * 100 : 0;
   const latchPct = Math.min((SPCX_VOL.zLatchX100 / 100) * (sigmaBps / 100), SPCX.triggerPct);
@@ -161,19 +192,40 @@ export default function RehypoHero({
       const released = wasTriggered && !r.triggered;
       if (released) {
         setFlow(1);
-        const back = recalledRef.deepbook + recalledRef.suilend + recalledRef.navi;
+        // Redeposit is capped by what is deployable NOW, not by what was
+        // recalled: VM paid during the crash shrinks the treasury (redepositing
+        // the pre-crash principal aborts 23), and only locked margin redeploys.
+        let deepbookBack = 0;
+        let simBudget = 0;
+        try {
+          const [fresh, fl] = await Promise.all([readInstitution(instId), readFloor(instId)]);
+          const imHeadroom = Math.max(0, fresh.reserved - fresh.rehypothecated);
+          deepbookBack = Math.floor(Math.max(0, Math.min(recalledRef.deepbook, imHeadroom, fl.deployable)) * 100) / 100;
+          simBudget = Math.max(0, imHeadroom - deepbookBack);
+        } catch {
+          /* reads failed — skip the redeposit rather than abort on-chain */
+        }
+        const suilendBack = Math.floor(Math.min(recalledRef.suilend, simBudget) * 100) / 100;
+        const naviBack = Math.floor(Math.min(recalledRef.navi, Math.max(0, simBudget - suilendBack)) * 100) / 100;
+        const back = deepbookBack + suilendBack + naviBack;
         setChartEvents((es) => [...es, { tick: tickIndex, kind: "redeposit", amount: back }]);
-        setBannerMsg({ tone: "green", text: `✓ VOLATILITY SUBSIDED ON-CHAIN (${SPCX_VOL.releaseNeeded} CALM PRINTS) · REDEPOSITING ${usd(back)}` });
-        if (recalledRef.deepbook > 0) {
+        setBannerMsg({
+          tone: "green",
+          text:
+            back > 0
+              ? `✓ VOLATILITY SUBSIDED ON-CHAIN (${SPCX_VOL.releaseNeeded} CALM PRINTS) · REDEPOSITING ${usd(back)}`
+              : `✓ VOLATILITY SUBSIDED ON-CHAIN (${SPCX_VOL.releaseNeeded} CALM PRINTS) · nothing to redeposit — VM consumed the recalled margin`,
+        });
+        if (deepbookBack > 0) {
           try {
-            const d = await rehypothecate(Math.floor(recalledRef.deepbook * 100) / 100);
+            const d = await rehypothecate(deepbookBack);
             setLastDigest(d);
           } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
+            setError(friendlyMoveError(e instanceof Error ? e.message : String(e)));
           }
         }
-        if (recalledRef.suilend > 0) simDeposit(instId, "suilend", recalledRef.suilend, aprs.suilend);
-        if (recalledRef.navi > 0) simDeposit(instId, "navi", recalledRef.navi, aprs.navi);
+        if (suilendBack > 0) simDeposit(instId, "suilend", suilendBack, aprs.suilend);
+        if (naviBack > 0) simDeposit(instId, "navi", naviBack, aprs.navi);
         setSims(loadSimVenues(instId));
         recalledRef.deepbook = 0;
         recalledRef.suilend = 0;
@@ -230,38 +282,70 @@ export default function RehypoHero({
     stopRef.current = false;
     const recalledRef = { deepbook: 0, suilend: 0, navi: 0 };
     let wasTriggered = triggered;
+    let misses = 0; // consecutive tick failures — transient errors must NOT kill the market
     try {
       while (!stopRef.current) {
         const t0 = Date.now();
-        const price = marketRef.current.next();
-        // arm the desk's contracts only while no call is pending, so the crash
-        // tick cranks them (margin calls) instead of silently auto-recalling
-        const arm = phaseRef.current === "idle" && otcIds.length ? otcIds : undefined;
-        const r = await pushTick(instId, price, arm);
-        const released = await applyTickResult(r, wasTriggered, recalledRef);
-        wasTriggered = r.triggered;
-        if (released) phaseRef.current = "idle"; // cycle complete — next crash can call again
+        try {
+          const price = marketRef.current.next();
+          // arm the desk's contracts only while no call is pending, so the crash
+          // tick cranks them (margin calls) instead of silently auto-recalling
+          const arm = phaseRef.current === "idle" && otcIds.length ? otcIds : undefined;
+          const r = await pushTick(instId, price, arm);
+          const released = await applyTickResult(r, wasTriggered, recalledRef);
+          wasTriggered = r.triggered;
+          if (released) phaseRef.current = "idle"; // cycle complete — next crash can call again
 
-        const calls = (r.marginCalls ?? []).filter((m) => m.deadline != null);
-        if (calls.length && phaseRef.current === "idle") {
-          phaseRef.current = "called";
-          setBannerMsg({
-            tone: "red",
-            text: `⚠ MM BREACH → MARGIN CALL on ${calls.length} position${calls.length > 1 ? "s" : ""} · pooled funds are deployed · cure window running`,
-          });
-          onRefresh();
-          await new Promise((res) => setTimeout(res, 2600));
-          if (autoCure && !stopRef.current) {
-            const cu = await cureCalls(instId, otcIds);
-            await applyCure(cu, recalledRef);
-            wasTriggered = cu.triggered;
+          const calls = (r.marginCalls ?? []).filter((m) => m.deadline != null);
+          if (calls.length && phaseRef.current === "idle") {
+            phaseRef.current = "called";
+            setBannerMsg({
+              tone: "red",
+              text: `⚠ MM BREACH → MARGIN CALL on ${calls.length} position${calls.length > 1 ? "s" : ""} · pooled funds are deployed · cure window running`,
+            });
+            onRefresh();
+            await new Promise((res) => setTimeout(res, 2600));
+            if (autoCure && !stopRef.current) {
+              // a failed cure (e.g. the desk genuinely cannot cover) is a demo
+              // STATE, not a reason to kill the market loop
+              try {
+                const cu = await cureCalls(instId, otcIds);
+                await applyCure(cu, recalledRef);
+                wasTriggered = cu.triggered;
+                if (!(cu.cured ?? []).some((x) => x.status === 0 && x.deadline == null)) {
+                  setBannerMsg({
+                    tone: "red",
+                    text: "⚠ CURE INSUFFICIENT — the desk cannot cover the call even after recall · deposit funds or it liquidates when the countdown lapses",
+                  });
+                }
+              } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e);
+                setBannerMsg({ tone: "red", text: `⚠ CURE FAILED — ${friendlyMoveError(msg)}` });
+              }
+            }
           }
+          misses = 0;
+        } catch (e) {
+          // transient RPC/route hiccup: warn and keep ticking; stop only when persistent
+          misses += 1;
+          const msg = e instanceof Error ? e.message : String(e);
+          if (misses >= 3) {
+            setError(`Market stopped after repeated failures: ${friendlyMoveError(msg)}`);
+            break;
+          }
+          setBannerMsg({ tone: "red", text: `⚠ transient tick error (${misses}/3, retrying) — ${friendlyMoveError(msg).slice(0, 90)}` });
         }
+        // cadence wait is interruptible: an injected event wakes the loop so the
+        // crash/spike print goes out as soon as the in-flight tx is done
         const wait = CADENCE_MS - (Date.now() - t0);
-        if (wait > 0) await new Promise((res) => setTimeout(res, wait));
+        if (wait > 0) {
+          await new Promise<void>((res) => {
+            wakeRef.current = res;
+            setTimeout(res, wait);
+          });
+          wakeRef.current = null;
+        }
       }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setRunning(false);
       stopRef.current = false;
@@ -270,9 +354,16 @@ export default function RehypoHero({
 
   function inject(kind: MarketEventKind) {
     marketRef.current?.inject(kind);
+    wakeRef.current?.(); // fire the next print now, don't wait out the cadence
     if (kind !== "calm") {
-      setBannerMsg({ tone: "red", text: kind === "crash" ? "💥 CRASH INCOMING — next print gaps −18…22%" : "▲ SQUEEZE INCOMING — next print gaps +18…23%" });
-      setTimeout(() => setBannerMsg(null), 1800);
+      const text =
+        kind === "crash"
+          ? "💥 CRASH BREWING — tremors first: watch the trigger pull collateral home BEFORE the main gap"
+          : kind === "gap"
+            ? "⚡ FLASH GAP — no warning: the breach cranks while funds are deployed (margin-call drill)"
+            : "▲ SQUEEZE INCOMING — next print gaps +18…23%";
+      setBannerMsg({ tone: "red", text });
+      setTimeout(() => setBannerMsg(null), 2600);
     }
   }
 
@@ -281,7 +372,10 @@ export default function RehypoHero({
     setBusy("reset");
     stopRef.current = true;
     try {
-      const r = await resetOracle();
+      // pass the open contracts: reset also defuses STALE margin calls on them
+      // (a pending call survives an oracle reset and would instant-liquidate the
+      // next breach — either side's — against its long-expired cure window)
+      const r = await resetOracle(otcIds);
       setMarkState(r.mark);
       setTriggered(r.triggered);
       setSigmaBps(r.sigmaBps);
@@ -291,7 +385,17 @@ export default function RehypoHero({
       setChartEvents([]);
       setBannerMsg(null);
       phaseRef.current = "idle";
+      if (r.clearedCalls?.length) {
+        setBannerMsg({ tone: "green", text: `✓ STAGE RESET · ${r.clearedCalls.length} stale margin call${r.clearedCalls.length > 1 ? "s" : ""} defused (fresh cure window on the next breach)` });
+        setTimeout(() => setBannerMsg(null), 3500);
+      }
+      if (r.stillCalled?.length) {
+        setError(
+          `${r.stillCalled.length} position${r.stillCalled.length > 1 ? "s are" : " is"} still breached with a live margin call — cure (deposit / recall) before the next crank, or it liquidates.`,
+        );
+      }
       await poll();
+      onRefresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -319,16 +423,18 @@ export default function RehypoHero({
 
   // ---- per-venue deploy / recall (DeepBook real; Suilend/Navi sim) ----
   async function venueDeploy(venue: VenueKey) {
+    // While the risk trigger is LATCHED, any tick auto-recalls all venues —
+    // a deploy would silently vanish on the next print ("my rehypothecation
+    // disappeared"). Refuse with the reason instead.
+    if (triggered) {
+      return setError(
+        `Risk trigger is LATCHED — deploys are auto-recalled by the next tick. Wait for the release (${releaseProgress}/${SPCX_VOL.releaseNeeded} calm prints) or press Reset.`,
+      );
+    }
     const max = venue === "deepbook" ? deepbookMax : simMax;
     const amt = Math.min(Number(amounts[venue]) || max, max);
     if (!state) return setError("Treasury state is still loading — try again in a second.");
-    if (amt <= 0) {
-      return setError(
-        venue === "deepbook"
-          ? `Nothing deployable to DeepBook: liquid ${usd(uiLiquid)}, on-chain floor ${usd(floor)} (deploys below the floor abort).`
-          : `Nothing deployable: liquid ${usd(uiLiquid)} minus the ${usd(floor)} liquidity floor leaves ${usd(simMax)}. Fund the treasury or recall from a venue.`,
-      );
-    }
+    if (amt <= 0) return setError(`Deploy unavailable: ${capReason(venue)}`);
     setError(null);
     setBusy(`d-${venue}`);
     setFlow(1);
@@ -370,6 +476,34 @@ export default function RehypoHero({
       setAmounts((a) => ({ ...a, [venue]: "" }));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+      setTimeout(() => setFlow(0), 600);
+    }
+  }
+
+  /** Move collateral venue → venue without touching the treasury total:
+   *  recall/withdraw out of the source, deploy into the target. DeepBook legs
+   *  are real testnet txs; SIM legs settle instantly in the ledger. */
+  async function doRebalance() {
+    if (rebFrom === rebTo) return setError("Pick two different venues to rebalance.");
+    const inFrom = rebFrom === "deepbook" ? rehyp : rebFrom === "suilend" ? suilendVal : naviVal;
+    const amt = Math.floor(Math.min(Number(rebAmt) || inFrom, inFrom) * 100) / 100;
+    if (amt <= 0) return setError(`Nothing to move — ${rebFrom} holds ${usd(inFrom)}.`);
+    setError(null);
+    setBusy("rebalance");
+    setFlow(1);
+    try {
+      if (rebFrom === "deepbook") setLastDigest(await recall(amt));
+      else setSims(simWithdraw(instId, rebFrom, amt, aprs[rebFrom]).all);
+      if (rebTo === "deepbook") setLastDigest(await rehypothecate(amt));
+      else setSims(simDeposit(instId, rebTo, amt, aprs[rebTo]));
+      setRebAmt("");
+      onRefresh();
+      await poll();
+    } catch (e) {
+      // a failed second leg leaves the moved amount in liquid — visible, not lost
+      setError(friendlyMoveError(e instanceof Error ? e.message : String(e)));
     } finally {
       setBusy(null);
       setTimeout(() => setFlow(0), 600);
@@ -436,10 +570,20 @@ export default function RehypoHero({
             <button
               onClick={() => inject("crash")}
               disabled={!running}
+              title="Pre-empted crash: −3…5% tremors latch the trigger and recall collateral BEFORE the −12…13% main gap lands"
               className="rounded-[7px] border px-3.5 py-2 text-[13px] font-semibold transition-colors disabled:opacity-30"
               style={{ borderColor: STATUS.red, color: STATUS.red }}
             >
               💥 Crash
+            </button>
+            <button
+              onClick={() => inject("gap")}
+              disabled={!running}
+              title="No-warning flash gap (−19…21% in one print): the breach cranks while funds are deployed — the margin-call drill"
+              className="rounded-[7px] border px-3.5 py-2 text-[13px] font-semibold transition-colors disabled:opacity-30"
+              style={{ borderColor: STATUS.red, color: STATUS.red, opacity: 0.85 }}
+            >
+              ⚡ Gap
             </button>
             <button
               onClick={() => inject("spike")}
@@ -470,9 +614,10 @@ export default function RehypoHero({
               </label>
             )}
           </div>
-          <p className="max-w-[330px] text-right text-[11px] leading-[1.5] text-muted">
-            A live feed — every print is a real on-chain push. Hit 💥 mid-stream: the σ latch fires, positions get margin-called,
-            the permissionless recall cures them; when the market calms, the {SPCX_VOL.releaseNeeded}-print hysteresis releases and margin redeposits.
+          <p className="max-w-[350px] text-right text-[11px] leading-[1.5] text-muted">
+            A live feed — every print is a real on-chain push. 💥 Crash arrives like real ones: tremors latch the σ trigger and the
+            permissionless recall pulls collateral home <em>before</em> the main gap. ⚡ Gap is the no-warning version — funds still
+            deployed → margin call → cure. When the market calms, the {SPCX_VOL.releaseNeeded}-print hysteresis releases and margin redeposits.
           </p>
         </div>
         {windowPoints.length > 0 ? (
@@ -489,44 +634,80 @@ export default function RehypoHero({
       {/* flow: liquid treasury — conduit — deployed across venues */}
       <div className="grid grid-cols-[1fr_auto_1fr] items-stretch gap-0 px-6 py-6">
         <Vessel
-          label="Liquid treasury · in protocol"
-          big={usd(uiLiquid)}
-          sub={reserved > 0 ? `posted IM ${usd(reserved)} fenced inside` : "no contracts yet"}
-          pct={pool > 0 ? uiLiquid / pool : 0}
+          label="Locked IM · margin backing open contracts"
+          big={usd(reserved)}
+          sub={
+            reserved > 0
+              ? `${usd(imIdle)} still in treasury · ${usd(Math.min(totalDeployed, reserved))} at venues · free liquidity ${usd(Math.max(0, uiLiquid - imIdle))} never deploys`
+              : `no contracts yet · free liquidity ${usd(uiLiquid)} never deploys`
+          }
+          pct={reserved > 0 ? imIdle / reserved : 0}
           tone="ink"
         />
         <Conduit flow={flow} />
         <Vessel
-          label="Deployed · earning yield"
+          label="Deployed to venues · earning"
           big={usd(totalDeployed)}
-          sub={interest > 0 ? `+${usd(interest, { maximumFractionDigits: 4 })} accrued on DeepBook` : totalDeployed > 0 ? "earning across venues" : "— idle —"}
+          sub={
+            overDeployed > 0.005
+              ? `⚠ ${usd(overDeployed)} above the current locked IM (older deploys) — Recall brings it home`
+              : interest > 0
+                ? `+${usd(interest, { maximumFractionDigits: 4 })} accrued on DeepBook`
+                : totalDeployed > 0
+                  ? "locked IM earning across venues"
+                  : imIdle > 0
+                    ? `locked IM ${usd(imIdle)} ready to deploy`
+                    : "— no margin locked —"
+          }
           pct={pctDeployed}
           tone="green"
-          subGreen={totalDeployed > 0}
+          subGreen={totalDeployed > 0 && overDeployed <= 0.005}
         />
       </div>
 
+      {/* capital allocation strip — where every dollar sits, at a glance */}
+      <AllocationStrip
+        liquid={uiLiquid}
+        imIdle={imIdle}
+        floor={floor}
+        flow={flow}
+        pctDeployed={pctDeployed}
+        overDeployed={overDeployed}
+        legs={[
+          { key: "deepbook", name: "DeepBook", value: rehyp },
+          { key: "suilend", name: "Suilend", value: suilendVal },
+          { key: "navi", name: "Navi", value: naviVal },
+        ]}
+      />
+
       {/* per-venue cards */}
-      <div className="grid gap-3 px-6 pb-5 sm:grid-cols-3">
-        <VenueCard venue="deepbook" name="DeepBook margin" logo="/logos/deepbook.png" badge="real · testnet" value={rehyp} share={totalDeployed > 0 ? rehyp / totalDeployed : 0} apr={aprs.deepbook} max={deepbookMax} amounts={amounts} setAmounts={setAmounts} busy={busy} onDeploy={() => venueDeploy("deepbook")} onRecall={() => venueRecall("deepbook")} />
-        <VenueCard venue="suilend" name="Suilend" logo="/logos/suilend.png" badge="sim · live mainnet APR" value={suilendVal} share={totalDeployed > 0 ? suilendVal / totalDeployed : 0} apr={aprs.suilend} max={simMax} amounts={amounts} setAmounts={setAmounts} busy={busy} onDeploy={() => venueDeploy("suilend")} onRecall={() => venueRecall("suilend")} />
-        <VenueCard venue="navi" name="Navi" logo="/logos/navi.png" badge="sim · live mainnet APR" value={naviVal} share={totalDeployed > 0 ? naviVal / totalDeployed : 0} apr={aprs.navi} max={simMax} amounts={amounts} setAmounts={setAmounts} busy={busy} onDeploy={() => venueDeploy("navi")} onRecall={() => venueRecall("navi")} />
+      <div className="grid gap-3 px-6 pb-6 sm:grid-cols-3">
+        <VenueCard venue="deepbook" name="DeepBook margin" logo="/logos/deepbook.png" badge="real · testnet" value={rehyp} share={totalDeployed > 0 ? rehyp / totalDeployed : 0} apr={aprs.deepbook} max={deepbookMax} reason={capReason("deepbook")} accrued={interest} amounts={amounts} setAmounts={setAmounts} busy={busy} onDeploy={() => venueDeploy("deepbook")} onRecall={() => venueRecall("deepbook")} />
+        <VenueCard venue="suilend" name="Suilend" logo="/logos/suilend.png" badge="sim · live mainnet APR" value={suilendVal} share={totalDeployed > 0 ? suilendVal / totalDeployed : 0} apr={aprs.suilend} max={simMax} reason={capReason("suilend")} accrued={simAccrued(sims.suilend, aprs.suilend)} amounts={amounts} setAmounts={setAmounts} busy={busy} onDeploy={() => venueDeploy("suilend")} onRecall={() => venueRecall("suilend")} />
+        <VenueCard venue="navi" name="Navi" logo="/logos/navi.png" badge="sim · live mainnet APR" value={naviVal} share={totalDeployed > 0 ? naviVal / totalDeployed : 0} apr={aprs.navi} max={simMax} reason={capReason("navi")} accrued={simAccrued(sims.navi, aprs.navi)} amounts={amounts} setAmounts={setAmounts} busy={busy} onDeploy={() => venueDeploy("navi")} onRecall={() => venueRecall("navi")} />
       </div>
 
-      {/* deploy gauge + on-chain liquidity floor */}
-      <div className="px-6 pb-3">
-        <div className="relative h-[6px] w-full overflow-hidden rounded-full bg-[rgba(0,0,0,0.07)]">
-          <div
-            className="absolute inset-y-0 left-0 rounded-full transition-[width] duration-700"
-            style={{ width: `${pctDeployed * 100}%`, background: flow === -1 ? STATUS.red : "#2456c4" }}
-          />
-        </div>
-        <div className="mt-2 flex flex-wrap items-center justify-between gap-2 font-mono text-[11px] tracking-[0.08em] text-muted">
-          <span>{Math.round(pctDeployed * 100)}% OF TREASURY EARNING · DEPLOYABLE {usd(deepbookMax)}</span>
-          <span>
-            LIQUIDITY FLOOR {usd(floor)} <span className="text-faint">· deploys abort below it, on-chain</span>
-          </span>
-        </div>
+      {/* rebalance: shift collateral between venues; treasury total unchanged */}
+      <div className="flex flex-wrap items-center gap-2 px-6 pb-5">
+        <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.13em] text-muted">⇄ Rebalance</span>
+        <VenueSelect value={rebFrom} onChange={setRebFrom} />
+        <span className="text-[13px] text-muted">→</span>
+        <VenueSelect value={rebTo} onChange={setRebTo} />
+        <input
+          type="number"
+          placeholder="amount · blank = all"
+          value={rebAmt}
+          onChange={(e) => setRebAmt(e.target.value === "" ? "" : +e.target.value)}
+          className="w-[150px] rounded-[6px] border border-line bg-bg px-2 py-1.5 font-mono text-[12px] text-ink outline-none focus:border-line-strong"
+        />
+        <button
+          onClick={doRebalance}
+          disabled={!!busy || rebFrom === rebTo}
+          className="rounded-[6px] border border-line-strong bg-ink px-3 py-1.5 text-[11.5px] font-semibold text-bg hover:opacity-90 disabled:opacity-40"
+        >
+          {busy === "rebalance" ? "…" : "Move"}
+        </button>
+        <span className="font-mono text-[10.5px] text-faint">DeepBook legs are real txs · SIM legs settle instantly</span>
       </div>
 
       {/* provenance */}
@@ -574,6 +755,99 @@ export default function RehypoHero({
   );
 }
 
+/** One stacked bar = the whole desk: free liquidity (VM/PnL buffer — never
+ *  leaves the treasury), locked IM awaiting deploy, then each venue's deployed
+ *  IM in its accent, with the on-chain liquidity floor as an inline marker.
+ *  Encodes the policy: ONLY locked margin is rehypothecated. */
+function AllocationStrip({
+  liquid,
+  imIdle,
+  floor,
+  flow,
+  pctDeployed,
+  overDeployed,
+  legs,
+}: {
+  liquid: number; // UI-liquid (free + locked-idle)
+  imIdle: number; // locked IM not yet deployed (part of `liquid`)
+  floor: number;
+  flow: Flow;
+  pctDeployed: number;
+  overDeployed: number; // deployed above the current locked IM (older deploys)
+  legs: { key: VenueKey; name: string; value: number }[];
+}) {
+  const fenced = Math.min(imIdle, liquid);
+  const free = Math.max(0, liquid - fenced);
+  const pool = liquid + legs.reduce((s, l) => s + l.value, 0);
+  const pct = (v: number) => (pool > 0 ? (v / pool) * 100 : 0);
+  const floorPct = Math.min(100, pct(Math.min(floor, pool)));
+  return (
+    <div className="px-6 pb-5">
+      <div className="mb-1.5 flex items-baseline justify-between font-mono text-[11px] tracking-[0.1em] text-muted">
+        <span className="uppercase">Capital allocation · only locked margin deploys</span>
+        <span>{Math.round(pctDeployed * 100)}% of locked margin earning</span>
+      </div>
+      <div className="relative flex h-[22px] w-full gap-[2px] overflow-hidden rounded-[7px]">
+        <div
+          className="h-full min-w-[2px] rounded-l-[7px] transition-[width] duration-700 ease-out"
+          style={{ width: `${pct(free)}%`, background: "rgba(0,0,0,0.06)", border: "1px solid var(--color-line)" }}
+          title={`free liquidity ${usd(free)} — VM/PnL buffer, never deployed`}
+        />
+        {fenced > 0 && (
+          <div
+            className="h-full transition-[width] duration-700 ease-out"
+            style={{ width: `${pct(fenced)}%`, background: "rgba(0,0,0,0.20)" }}
+            title={`locked IM ${usd(fenced)} — margin held for open contracts, awaiting deploy`}
+          />
+        )}
+        {legs.map(
+          (l) =>
+            l.value > 0 && (
+              <div
+                key={l.key}
+                className="h-full transition-[width] duration-700 ease-out last:rounded-r-[7px]"
+                style={{ width: `${pct(l.value)}%`, background: VENUE_ACCENT[l.key], opacity: flow === -1 ? 0.55 : 1 }}
+                title={`${l.name} ${usd(l.value)}`}
+              />
+            ),
+        )}
+        {/* on-chain liquidity floor marker (deploys below it abort) */}
+        {floor > 0 && pool > 0 && (
+          <div className="pointer-events-none absolute inset-y-0" style={{ left: `${floorPct}%` }}>
+            <div className="h-full w-[2px]" style={{ background: STATUS.red, opacity: 0.7 }} />
+          </div>
+        )}
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[11px] text-muted">
+        <span className="flex items-center gap-1.5">
+          <span className="h-[8px] w-[8px] rounded-[2px]" style={{ background: "rgba(0,0,0,0.10)", border: "1px solid var(--color-line-strong)" }} />
+          free liquidity {usd(free)} <span className="text-faint">· VM/PnL stays here</span>
+        </span>
+        <span className="flex items-center gap-1.5" style={{ opacity: fenced > 0 ? 1 : 0.45 }} title="margin locked to open contracts, still in the treasury — the only capital that deploys">
+          <span className="h-[8px] w-[8px] rounded-[2px]" style={{ background: "rgba(0,0,0,0.28)" }} />
+          locked IM {usd(fenced)} <span className="text-faint">· undeployed</span>
+        </span>
+        {overDeployed > 0.005 && (
+          <span className="flex items-center gap-1 font-semibold" style={{ color: "#8a6d1a" }} title="deployed before the IM-only policy (or the contracts since released their IM) — Recall brings it back to the treasury">
+            ⚠ {usd(overDeployed)} deployed above locked IM
+          </span>
+        )}
+        {legs.map((l) => (
+          <span key={l.key} className="flex items-center gap-1.5" style={{ opacity: l.value > 0 ? 1 : 0.45 }}>
+            <span className="h-[8px] w-[8px] rounded-[2px]" style={{ background: VENUE_ACCENT[l.key] }} />
+            {l.name} {usd(l.value)}
+            {pool > 0 && l.value > 0 && <span className="text-faint">({Math.round(pct(l.value))}%)</span>}
+          </span>
+        ))}
+        <span className="ml-auto flex items-center gap-1.5">
+          <span className="h-[10px] w-[2px]" style={{ background: STATUS.red, opacity: 0.7 }} />
+          floor {usd(floor)} <span className="text-faint">· deploys below abort on-chain</span>
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function VenueCard({
   venue,
   name,
@@ -583,6 +857,8 @@ function VenueCard({
   share,
   apr,
   max,
+  reason,
+  accrued,
   amounts,
   setAmounts,
   busy,
@@ -597,6 +873,8 @@ function VenueCard({
   share: number; // of total deployed
   apr: number;
   max: number; // deployable into this venue right now
+  reason: string; // WHY max is what it is — always visible, never a silent $0
+  accrued?: number; // realised interest above principal (DeepBook: live on-chain)
   amounts: Record<string, number | "">;
   setAmounts: React.Dispatch<React.SetStateAction<Record<string, number | "">>>;
   busy: string | null;
@@ -605,12 +883,15 @@ function VenueCard({
 }) {
   const accent = VENUE_ACCENT[venue];
   const real = venue === "deepbook";
+  const capacity = value + Math.max(0, max); // deployed + headroom available now
+  const fillPct = capacity > 0 ? (value / capacity) * 100 : 0;
+  const perYear = (value * apr) / 100;
   return (
     <div className="rounded-[12px] border border-line-strong bg-bg p-4" style={{ borderTop: `3px solid ${accent}` }}>
       <div className="flex items-center justify-between">
         <span className="flex items-center gap-2">
-          <Image src={logo} alt="" width={18} height={18} className="rounded-[4px]" />
-          <span className="text-[13px] font-semibold text-ink">{name}</span>
+          <Image src={logo} alt="" width={22} height={22} className="rounded-[5px]" />
+          <span className="text-[13.5px] font-semibold text-ink">{name}</span>
         </span>
         <span
           className="rounded-[4px] px-1.5 py-0.5 font-mono text-[9.5px] font-semibold uppercase tracking-[0.06em]"
@@ -620,19 +901,36 @@ function VenueCard({
         </span>
       </div>
       <div className="mt-3 flex items-baseline justify-between">
-        <span className="font-mono text-[19px] font-semibold text-ink">{usd(value)}</span>
-        <span className="font-mono text-[12px] font-semibold" style={{ color: "#1a6042" }}>
-          {apr.toFixed(2)}% APR
+        <span className="font-mono text-[22px] font-semibold" style={{ color: value > 0 ? accent : "var(--color-ink)" }}>
+          {usd(value)}
+        </span>
+        <span className="text-right">
+          <span className="block font-mono text-[12px] font-semibold" style={{ color: "#1a6042" }}>
+            {apr.toFixed(2)}% APR
+          </span>
+          <span className="block font-mono text-[10.5px] text-muted">
+            {value > 0 ? `≈ ${usd(perYear)}/yr` : "deploy to earn"}
+          </span>
         </span>
       </div>
-      {/* share of deployed capital, in the venue's accent */}
-      <div className="mt-2 h-[5px] w-full overflow-hidden rounded-full bg-[rgba(0,0,0,0.07)]">
-        <div className="h-full rounded-full transition-[width] duration-500" style={{ width: `${Math.round(share * 100)}%`, background: accent }} />
+      {/* deployed vs headroom-now — how "full" this venue is for the desk */}
+      <div className="mt-2.5 h-[7px] w-full overflow-hidden rounded-full bg-[rgba(0,0,0,0.07)]">
+        <div className="h-full rounded-full transition-[width] duration-500" style={{ width: `${fillPct}%`, background: accent }} />
+      </div>
+      <div className="mt-1 flex items-center justify-between font-mono text-[10.5px] text-muted">
+        <span>{value > 0 ? `${Math.round(share * 100)}% of deployed` : "idle"}</span>
+        <span>
+          {accrued && accrued > 0
+            ? <span style={{ color: "#1a6042" }}>+{usd(accrued, { maximumFractionDigits: 4 })} accrued</span>
+            : max > 0
+              ? `headroom ${usd(max)}`
+              : "no headroom"}
+        </span>
       </div>
       <div className="mt-3 flex items-center gap-1.5">
         <input
           type="number"
-          placeholder={max > 0 ? `max ${Math.floor(max)}` : "amount"}
+          placeholder={max > 0 ? `max ${Math.floor(max * 100) / 100}` : "—"}
           value={amounts[venue] ?? ""}
           onChange={(e) => {
             const v = e.target.value === "" ? "" : +e.target.value;
@@ -656,6 +954,10 @@ function VenueCard({
           {busy === `r-${venue}` ? "…" : "Recall"}
         </button>
       </div>
+      {/* why the cap is what it is — a $0 max must explain itself */}
+      <p className="mt-1.5 text-[10.5px] leading-[1.5]" style={{ color: max > 0 ? "var(--color-faint, #a09a8e)" : "#8a6d1a" }}>
+        {reason}
+      </p>
     </div>
   );
 }
@@ -710,6 +1012,20 @@ function Conduit({ flow }: { flow: Flow }) {
         {caption}
       </span>
     </div>
+  );
+}
+
+function VenueSelect({ value, onChange }: { value: VenueKey; onChange: (v: VenueKey) => void }) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value as VenueKey)}
+      className="rounded-[6px] border border-line bg-bg px-2 py-1.5 font-mono text-[12px] text-ink outline-none focus:border-line-strong"
+    >
+      <option value="deepbook">DeepBook</option>
+      <option value="suilend">Suilend</option>
+      <option value="navi">Navi</option>
+    </select>
   );
 }
 

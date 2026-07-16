@@ -12,10 +12,16 @@ export const runtime = "nodejs";
 
 const MAX_PER_REQUEST = 100; // DBUSDC cap per call
 
-/* The mock fiat on-ramp's funded source. Local demo: read the active key from
-   ~/.sui (the publisher / priceless-heliotrope key that holds DBUSDC). Deployed:
-   set FAUCET_SECRET_KEY (a bech32 `suiprivkey…`). SERVER ONLY. */
+/* The mock fiat on-ramp's funded source. Resolution order:
+   1. DBUSDC_FAUCET_SECRET_KEY — a DEDICATED faucet wallet (bech32 suiprivkey…),
+      used ONLY by this route. Lets a dev environment draw on-ramp stock from
+      its own wallet without touching the ops key that the oracle/makers/gas
+      routes need (it holds the keeper + maker caps).
+   2. FAUCET_SECRET_KEY — the shared ops key (deployed environments).
+   3. The active ~/.sui key (local default). SERVER ONLY. */
 function faucetKeypair(): Ed25519Keypair {
+  const dedicated = process.env.DBUSDC_FAUCET_SECRET_KEY;
+  if (dedicated) return Ed25519Keypair.fromSecretKey(dedicated);
   const fromEnv = process.env.FAUCET_SECRET_KEY;
   if (fromEnv) return Ed25519Keypair.fromSecretKey(fromEnv);
 

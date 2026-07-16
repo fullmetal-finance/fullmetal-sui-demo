@@ -5,6 +5,8 @@ import { useCurrentAccount } from "@mysten/dapp-kit-react";
 import { Transaction } from "@mysten/sui/transactions";
 
 import { CLOCK, DBUSDC_TYPE, SHARED, TARGET, toUnits } from "./fullmetal";
+import { readFloor } from "./institution-state";
+import { friendlyMoveError } from "./oracle";
 import { useRehypothecate } from "./rehypo-actions";
 import { useSponsoredExecute } from "./sponsored";
 import { createdId, suiRead } from "./sui";
@@ -26,7 +28,14 @@ export type OtcDraft = {
   rehypo: boolean; // deploy the posted IM to DeepBook on open
 };
 
-export type OtcResult = { digest: string; offerId: string; kind: "direct" | "rfq" };
+export type OtcResult = {
+  digest: string;
+  offerId: string;
+  kind: "direct" | "rfq";
+  /** the contract opened but the IM auto-deploy to DeepBook failed — deploy
+   *  manually from the collateral manager (only locked IM is rehypothecated) */
+  deployWarning?: string;
+};
 
 /** Encapsulates everything the create-OTC pop-up needs: ensure the signed-in
  *  admin has a trader seat (lazy self-grant), resolve the counterparty by org
@@ -113,15 +122,22 @@ export function useCreateOtc() {
             });
           }
         }
-        // default behaviour: the posted IM is rehypothecated to DeepBook on open
+        // default behaviour: the posted (locked) IM is rehypothecated to
+        // DeepBook on open — capped to the on-chain deployable (floor) so the
+        // deploy cannot abort. Non-fatal on failure, but surfaced to the caller.
+        let deployWarning: string | undefined;
         if (d.rehypo && d.im > 0) {
           try {
-            await rehypothecate(Math.floor(d.im * 100) / 100);
-          } catch {
-            /* non-fatal — the desk can deploy manually from the collateral engine */
+            const fl = await readFloor(rec.institutionId).catch(() => null);
+            const amt = Math.floor(Math.min(d.im, fl?.deployable ?? d.im) * 100) / 100;
+            if (amt > 0) await rehypothecate(amt);
+            else deployWarning = "the on-chain liquidity floor leaves nothing deployable right now";
+          } catch (e) {
+            deployWarning = friendlyMoveError(e instanceof Error ? e.message : String(e));
+            console.warn("[fullmetal] IM auto-deploy to DeepBook failed:", e);
           }
         }
-        return { digest, offerId, kind: "direct" };
+        return { digest, offerId, kind: "direct", deployWarning };
       }
 
       // RFQ (broadcast): no counterparty, no strike — makers compete on price

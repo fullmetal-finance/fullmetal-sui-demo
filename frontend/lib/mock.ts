@@ -34,8 +34,8 @@ export type MockPosition = {
 };
 
 export const MOCK_POSITIONS: MockPosition[] = [
-  { asset: "SPCX", side: "long", trader: "A. Whitfield", cpty: "Cumberland", notional: 925_000, entry: 178.2, mark: 185.0, im: 92_500, maturity: "30d", venue: "DeepBook" },
-  { asset: "SPCX", side: "short", trader: "M. Okonkwo", cpty: "Galaxy", notional: 555_000, entry: 188.4, mark: 185.0, im: 55_500, maturity: "Perp", venue: "Suilend" },
+  { asset: "SPCX", side: "long", trader: "A. Whitfield", cpty: "Cumberland", notional: 925_000, entry: 142.7, mark: 148.0, im: 92_500, maturity: "30d", venue: "DeepBook" },
+  { asset: "SPCX", side: "short", trader: "M. Okonkwo", cpty: "Galaxy", notional: 555_000, entry: 150.9, mark: 148.0, im: 55_500, maturity: "Perp", venue: "Suilend" },
   { asset: "BTC", side: "long", trader: "A. Whitfield", cpty: "Wintermute", notional: 1_200_000, entry: 64_200, mark: 66_800, im: 120_000, maturity: "7d", venue: "Navi" },
 ];
 
@@ -53,9 +53,9 @@ export type IncomingRfq = {
 };
 
 export const MOCK_INCOMING_RFQS: IncomingRfq[] = [
-  { id: "rfq-aurora", from: "Aurora Capital", asset: "SPCX", side: "buy", notional: 740_000, tenor: "30d", ageMins: 3, refPrice: 185 },
+  { id: "rfq-aurora", from: "Aurora Capital", asset: "SPCX", side: "buy", notional: 740_000, tenor: "30d", ageMins: 3, refPrice: 148 },
   { id: "rfq-meridian", from: "Meridian Markets", asset: "BTC", side: "two-way", notional: 1_500_000, tenor: "Perp", ageMins: 11, refPrice: 66_800 },
-  { id: "rfq-tessera", from: "Tessera Trading", asset: "SPCX", side: "sell", notional: 410_000, tenor: "14d", ageMins: 26, refPrice: 185 },
+  { id: "rfq-tessera", from: "Tessera Trading", asset: "SPCX", side: "sell", notional: 410_000, tenor: "14d", ageMins: 26, refPrice: 148 },
 ];
 
 export type MockCounterparty = { name: string; status: "approved" };

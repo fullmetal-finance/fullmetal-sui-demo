@@ -16,10 +16,11 @@ import QuotesInbox from "../components/QuotesInbox";
 import MarketRfqs from "../components/MarketRfqs";
 import RatesBar from "../components/RatesBar";
 import { DBUSDC_TYPE, TARGET, explorer, usd } from "@/lib/fullmetal";
-import { clearInstitution, loadInstitution, saveInstitution, saveQuotes, type InstitutionRecord } from "@/lib/store";
+import { clearInstitution, loadInstitution, saveInstitution, type InstitutionRecord } from "@/lib/store";
 import { readAcceptedOffers, readInstitution, readUserContracts, type InstState } from "@/lib/institution-state";
 import { clearSimVenues } from "@/lib/venues";
 import { useSponsoredExecute } from "@/lib/sponsored";
+import { useMakerQuotes } from "@/lib/use-maker-quotes";
 import type { OtcResult } from "@/lib/otc";
 import { MOCK_INCOMING_RFQS, MOCK_POSITIONS, positionPnl, type MockPosition } from "@/lib/mock";
 
@@ -35,7 +36,6 @@ export default function Dashboard() {
   const [tab, setTab] = useState<Tab>("positions");
   const [otcOpen, setOtcOpen] = useState(false);
   const [loadOpen, setLoadOpen] = useState(false);
-  const [makersBusy, setMakersBusy] = useState(false);
   const [resetMsg, setResetMsg] = useState<string | null>(null);
   // unread RFQ-inbox badge: seeded with the standing incoming RFQs, bumped when
   // a broadcast RFQ draws quotes; cleared when the desk opens the tab.
@@ -46,6 +46,18 @@ export default function Dashboard() {
     tabRef.current = t;
     if (t === "rfq") setRfqUnread(0);
   }, []);
+
+  // desk quotes: auto-kick new RFQs, rediscover live quotes from the chain
+  // every few seconds (survives refreshes — no localStorage handoff)
+  const makerQuotes = useMakerQuotes(rec?.rfqIds ?? []);
+  const quoteCount = makerQuotes.sections.reduce((n, s) => n + s.quotes.length, 0);
+  const prevQuoteCount = useRef(0);
+  useEffect(() => {
+    if (quoteCount > prevQuoteCount.current && tabRef.current !== "rfq") {
+      setRfqUnread((n) => n + (quoteCount - prevQuoteCount.current));
+    }
+    prevQuoteCount.current = quoteCount;
+  }, [quoteCount]);
 
   useEffect(() => {
     setMounted(true);
@@ -157,31 +169,12 @@ export default function Dashboard() {
     await sync(rec.institutionId);
   }
 
-  async function onOtcCreated(res: OtcResult) {
+  function onOtcCreated(res: OtcResult) {
     reload();
     if (rec) sync(rec.institutionId);
-    if (res.kind === "rfq") {
-      setMakersBusy(true);
-      let count = 3;
-      try {
-        const r = await fetch("/api/makers", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ rfqId: res.offerId }),
-        });
-        const d = await r.json().catch(() => ({}));
-        if (r.ok && d.quotes?.length) {
-          saveQuotes(res.offerId, d.quotes);
-          count = d.quotes.length;
-        }
-      } catch {
-        /* makers offline — inbox shows preview */
-      } finally {
-        setMakersBusy(false);
-      }
-      // light up the RFQ tab — unless the desk is already looking at it
-      if (tabRef.current !== "rfq") setRfqUnread((n) => n + count);
-    }
+    // RFQ broadcast: nothing else to do — useMakerQuotes sees the new rfqId,
+    // kicks the desks, and the badge bumps when their quotes land on-chain.
+    void res;
   }
 
   // net variation margin that would settle in the next 24h cycle across the
@@ -265,7 +258,7 @@ export default function Dashboard() {
                       {rfqUnread}
                     </span>
                   )}
-                  {makersBusy && <span className="ml-1.5 inline-block h-[5px] w-[5px] animate-pulse rounded-full bg-[#1f6f4d] align-middle" />}
+                  {makerQuotes.pending && <span className="ml-1.5 inline-block h-[5px] w-[5px] animate-pulse rounded-full bg-[#1f6f4d] align-middle" />}
                 </PanelTab>
                 <PanelTab active={tab === "engine"} onClick={() => selectTab("engine")}>Collateral manager</PanelTab>
               </div>
@@ -302,7 +295,7 @@ export default function Dashboard() {
                   <div className="space-y-6">
                     <QuotesInbox
                       rfqIds={rec.rfqIds ?? []}
-                      loading={makersBusy}
+                      quotes={makerQuotes}
                       onAccepted={(otcId) => {
                         if (account) {
                           const next = { ...rec, otcIds: [...(rec.otcIds ?? []), otcId] };

@@ -8,11 +8,14 @@ import {
   MAINTENANCE_PCT,
   MIN_IM_PCT,
   PROTOCOL_MIN_IM,
+  SPCX,
   explorer,
   usd,
 } from "@/lib/fullmetal";
+import { oracleStatus } from "@/lib/oracle";
 import { useCreateOtc, type OtcResult } from "@/lib/otc";
 import { useRates } from "@/lib/rates";
+import MarkChart from "./MarkChart";
 
 export default function CreateOtcModal({
   open,
@@ -31,7 +34,7 @@ export default function CreateOtcModal({
   const [side, setSide] = useState<"long" | "short">("long");
   const [asset, setAsset] = useState("SPCX");
   const [notional, setNotional] = useState(1);
-  const [strike, setStrike] = useState(185);
+  const [strike, setStrike] = useState<number>(SPCX.initialMark);
   const [im, setIm] = useState(5);
   const [imTouched, setImTouched] = useState(false);
   const [offerMins, setOfferMins] = useState(60);
@@ -42,13 +45,43 @@ export default function CreateOtcModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<OtcResult | null>(null);
+  const [strikeTouched, setStrikeTouched] = useState(false);
+  const [liveMark, setLiveMark] = useState<number | null>(null);
+
+  // live oracle mark while the modal is open — the same feed contracts settle on
+  useEffect(() => {
+    if (!open || done) return;
+    let alive = true;
+    const read = async () => {
+      try {
+        const s = await oracleStatus();
+        if (alive) setLiveMark(s.mark);
+      } catch {
+        /* transient */
+      }
+    };
+    read();
+    const t = window.setInterval(read, 4000);
+    return () => {
+      alive = false;
+      window.clearInterval(t);
+    };
+  }, [open, done]);
+
+  // strike tracks the live mark until the user edits it
+  useEffect(() => {
+    if (!strikeTouched && liveMark && liveMark > 0 && asset === SPCX.symbol) {
+      setStrike(Math.round(liveMark * 100) / 100);
+    }
+  }, [liveMark, strikeTouched, asset]);
 
   const notionalUsd = notional * strike;
   const minIm = Math.max(PROTOCOL_MIN_IM, notionalUsd * MIN_IM_PCT);
 
-  // prefill IM from notional×strike until the user edits it
+  // prefill IM from notional×strike until the user edits it (ceil — a rounded-
+  // down prefill would sit below the 5% floor and invalidate the form)
   useEffect(() => {
-    if (!imTouched) setIm(Math.max(PROTOCOL_MIN_IM, Math.round(notionalUsd * MIN_IM_PCT)));
+    if (!imTouched) setIm(Math.max(PROTOCOL_MIN_IM, Math.ceil(notionalUsd * MIN_IM_PCT)));
   }, [notionalUsd, imTouched]);
 
   const leverage = im > 0 ? notionalUsd / im : 0;
@@ -81,6 +114,9 @@ export default function CreateOtcModal({
         rehypo,
       });
       setDone(r);
+      if (r.deployWarning) {
+        setError(`Offer created — but the locked IM did not auto-deploy to DeepBook (${r.deployWarning}). Deploy it from the collateral manager.`);
+      }
       onCreated?.(r);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -159,17 +195,44 @@ export default function CreateOtcModal({
 
             {/* Economics */}
             <Section label="Economics">
+              {asset === SPCX.symbol && (
+                <MarkChart symbol={SPCX.symbol} label={SPCX.label} />
+              )}
               <div className="grid gap-4 sm:grid-cols-2">
                 <Labeled label="Asset">
                   <input className={input} value={asset} onChange={(e) => setAsset(e.target.value.toUpperCase())} placeholder="SPCX" />
                 </Labeled>
-                <Labeled label="Notional" hint="units of underlying">
-                  <input className={input} type="number" value={notional} onChange={(e) => setNotional(+e.target.value)} />
+                <Labeled label="Notional" hint="units of underlying — fractional OK (min 0.000001)">
+                  <input className={input} type="number" step="0.1" min="0" value={notional} onChange={(e) => setNotional(+e.target.value)} />
                 </Labeled>
               </div>
               {entry === "direct" && (
-                <Labeled label="Forward price / strike" hint="agreed settlement level (USD)">
-                  <input className={input} type="number" step="0.0001" value={strike} onChange={(e) => setStrike(+e.target.value)} />
+                <Labeled label="Forward price / strike" hint="agreed settlement level (USD) — tracks the live mark until you edit it">
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      className={input}
+                      type="number"
+                      step="0.0001"
+                      value={strike}
+                      onChange={(e) => {
+                        setStrikeTouched(true);
+                        setStrike(+e.target.value);
+                      }}
+                    />
+                    {liveMark != null && asset === SPCX.symbol && strikeTouched && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setStrikeTouched(false);
+                          setStrike(Math.round(liveMark * 100) / 100);
+                        }}
+                        className="shrink-0 rounded-[6px] border border-line-strong px-2 py-1.5 font-mono text-[11px] text-ink hover:bg-bg"
+                        title="snap back to the live oracle mark"
+                      >
+                        ↺ live
+                      </button>
+                    )}
+                  </div>
                 </Labeled>
               )}
               <Labeled label="Price source (oracle)">

@@ -1,60 +1,3 @@
-/* Scripted oracle price paths for the demo scenario player. Each tick is a
-   REAL on-chain `push_price_v2` (keeper-signed, server route) — the chart
-   reacts to chain state, never to these arrays. The paths were designed
-   against a bit-exact offline replica of oracle.move's integer EWMA math and
-   the flash-crash path is verified on live testnet (scripts/vol-smoke.ts):
-   with the SPCX calibration (seed σ150bps, λ0.60, z*4.0, ceil 800bps,
-   θ0.70, N=3) latch/release land on the ticks below.
-
-   `expect` is annotation metadata for pre-flight labels only — markers on the
-   chart are drawn from actual on-chain transitions. */
-
-export type ScenarioKey = "flash-crash" | "melt-up" | "calm-drift";
-
-export type Scenario = {
-  key: ScenarioKey;
-  label: string;
-  blurb: string;
-  /** USD marks pushed on-chain, in order. Runs from the $185 nominal mark. */
-  prices: number[];
-  /** Minimum ms between ticks (a tick also waits for its tx to confirm). */
-  cadenceMs: number;
-  expect: { latchTick: number | null; releaseTick: number | null };
-};
-
-export const NOMINAL_MARK = 185;
-
-export const SCENARIOS: Scenario[] = [
-  {
-    key: "flash-crash",
-    label: "Flash crash",
-    blurb: "−20% gap down, violent chop, then stabilisation at the lower level",
-    prices: [184.6, 185.3, 184.9, 148.0, 152.5, 147.8, 151.2, 149.6, 150.4, 150.1, 150.6, 151.4],
-    cadenceMs: 1200,
-    expect: { latchTick: 4, releaseTick: 10 },
-  },
-  {
-    key: "melt-up",
-    label: "Melt-up",
-    blurb: "+25% spike (short squeeze), chop at the highs, then calm",
-    prices: [185.4, 184.8, 231.2, 228.4, 230.0, 229.0, 229.4, 229.1, 229.3, 229.5],
-    cadenceMs: 1200,
-    expect: { latchTick: 3, releaseTick: 10 },
-  },
-  {
-    key: "calm-drift",
-    label: "Calm drift",
-    blurb: "Ordinary two-way noise — never latches, collateral keeps earning",
-    prices: [185.5, 184.9, 185.8, 185.2, 186.0, 185.4, 185.9, 185.6, 186.1, 185.8],
-    cadenceMs: 1200,
-    expect: { latchTick: null, releaseTick: null },
-  },
-];
-
-export function scenarioByKey(key: ScenarioKey): Scenario {
-  return SCENARIOS.find((s) => s.key === key) ?? SCENARIOS[0];
-}
-
 /* ------------------------------------------------------------------ */
 /*  Live market simulator — a continuous ticker that FEELS like a real */
 /*  feed: gentle mean-reverting drift in calm, injectable crash/spike  */
@@ -64,7 +7,7 @@ export function scenarioByKey(key: ScenarioKey): Scenario {
 /*  and ~3 calm prints after σ decays the latch auto-releases.         */
 /* ------------------------------------------------------------------ */
 
-export type MarketEventKind = "crash" | "spike" | "calm";
+export type MarketEventKind = "crash" | "gap" | "spike" | "calm";
 
 export type MarketSim = {
   /** queue a regime event; it lands on the next tick */
@@ -80,6 +23,8 @@ export function createMarketSim(startPrice: number): MarketSim {
   let anchor = startPrice; // post-event equilibrium the drift reverts toward
   let volBps = 42; // print-vol regime; decays back to calm after events
   let pending: MarketEventKind | null = null;
+  // staged event prints (multiplicative returns), consumed one per tick
+  let queue: { ret: number; vol: number }[] = [];
 
   // Print magnitude bounded to [0.6, 1.8]× the vol regime (random sign): keeps
   // the on-chain EWMA σ from collapsing in quiet stretches, where an ordinary
@@ -90,13 +35,37 @@ export function createMarketSim(startPrice: number): MarketSim {
 
   return {
     inject(kind: MarketEventKind) {
+      if (kind === "crash") {
+        // PRE-EMPTED crash — how real crashes arrive (vol clusters): tremors
+        // first. The first −3…4% print is already a z ≫ 4σ shock against a
+        // calm ~50 bps regime, so the trigger latches and the permissionless
+        // recall brings collateral home BEFORE the main gap two prints later.
+        // Cumulative −19…21% (drill window unchanged).
+        queue = [
+          { ret: -(0.03 + Math.random() * 0.01), vol: 220 }, // tremor: latch + recall
+          { ret: -(0.04 + Math.random() * 0.01), vol: 360 }, // escalation
+          { ret: -(0.12 + Math.random() * 0.012), vol: 520 }, // the main gap — money already out
+        ];
+        pending = null;
+        return;
+      }
       pending = kind;
     },
     vol: () => Math.round(volBps),
     next(): number {
-      if (pending === "crash") {
+      if (queue.length) {
+        const step = queue.shift()!;
+        level = level * (1 + step.ret);
+        anchor = level;
+        volBps = step.vol;
+        return round(level);
+      }
+      if (pending === "gap") {
         pending = null;
-        level = level * (1 - (0.18 + Math.random() * 0.04)); // −18…22% gap
+        // NO-WARNING single gap (−19…21%): funds are still deployed when the
+        // breach cranks — this is the margin-call / due-process drill.
+        // (VM owed $28–31 on 1 SPCX @ ~$148 — a $34 desk always calls, always cures.)
+        level = level * (1 - (0.19 + Math.random() * 0.02));
         anchor = level;
         volBps = 520; // violent aftermath, decays below
         return round(level);

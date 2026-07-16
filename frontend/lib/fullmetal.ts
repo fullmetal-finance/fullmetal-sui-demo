@@ -52,12 +52,14 @@ export const MAINTENANCE_PCT = 0.7; // MM = 70% of IM (MAINTENANCE_BPS = 7000 on
 
 export const INTERVAL_MS = { hourly: 3_600_000, daily: 86_400_000 } as const;
 
-/** Demo underlying — SPCX (SpaceX), freshly public + volatile. Marks in USD. */
+/** Demo underlying — SPCX (SpaceX). Really listed June 2026 (Nasdaq: SPCX,
+ *  IPO $135, trading ≈$148 in July 2026) — freshly public + volatile, for real.
+ *  Marks in USD. */
 export const SPCX = {
   symbol: "SPCX",
   label: "SpaceX",
-  initialMark: 185,
-  spikeMark: 240, // +29% > 15% trigger threshold → latches the oracle
+  initialMark: 148,
+  spikeMark: 192, // +30% > 15% trigger threshold → latches the oracle
   // on-chain feed `jump_threshold_bps` (1500) — a push whose |Δ|/prev exceeds
   // this latches the trigger and the permissionless recall fires. (With the
   // EWMA layer armed, a z > 4σ move latches even earlier — see SPCX_VOL.)

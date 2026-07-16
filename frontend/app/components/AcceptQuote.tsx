@@ -32,6 +32,9 @@ export default function AcceptQuote({ onAccepted }: { onAccepted?: () => void })
     try {
       const r = await accept(id.trim());
       setOtcId(r.otcId);
+      if (r.deployWarning) {
+        setError(`Contract opened — but the locked IM did not auto-deploy to DeepBook (${r.deployWarning}). Deploy it from the collateral manager.`);
+      }
       onAccepted?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

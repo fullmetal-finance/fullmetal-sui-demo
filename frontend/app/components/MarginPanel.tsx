@@ -5,18 +5,20 @@ import { useCallback, useEffect, useState } from "react";
 import { usd } from "@/lib/fullmetal";
 import type { InstState } from "@/lib/institution-state";
 import { readContractsHealth, type ContractHealth } from "@/lib/institution-state";
-import type { MockPosition } from "@/lib/mock";
+import { positionPnl, type MockPosition } from "@/lib/mock";
 import { crankContract } from "@/lib/oracle";
 import { CATEGORICAL, STATUS } from "@/lib/palette";
 
-/* Cross-margin panel — the story in one picture:
-   ONE pooled treasury (the full bar) backs EVERY contract. Each contract's
-   initial margin is a colored FENCE inside the pool (an accounting hold, the
-   coins never move), the green region is free capital, and the red rule is
-   Σ maintenance — the level the pool must never be run below. The same fenced
-   collateral is simultaneously out earning at venues. Rows below carry each
-   contract's live health; a breach shows the margin-call countdown (cure
-   window) and the permissionless crank. */
+/* Cross-margin panel — makes the mechanism VISIBLE, not just named:
+   1. one pooled-treasury bar: every trade's IM is a colored fence INSIDE the
+      same bar (an accounting hold — the coins never move), the rest is ONE
+      shared VM buffer, and the red rule is the Σ-maintenance floor;
+   2. a live VM-netting readout: each position's mark-to-market flow, and the
+      single NET figure the pool actually settles — gains on one contract
+      backing losses on another is what cross-margin IS;
+   3. a buffer-coverage gauge (free ÷ Σ maintenance) — desk health in one number;
+   4. per-contract rows with live health, margin-call countdowns and the
+      permissionless crank. */
 
 export default function MarginPanel({
   state,
@@ -76,37 +78,46 @@ export default function MarginPanel({
   const isExpired = (p: MockPosition) => (p.expiryMs ?? 0) > 0 && now >= (p.expiryMs ?? 0);
   const liveStatus = (p: MockPosition) => health[p.otcId!]?.status ?? p.status ?? 0;
   const open = real.filter((p) => liveStatus(p) === 0);
-  const fenced = open.filter((p) => !isExpired(p)); // expired stay listed below, not fenced… (IM still reserved until closed)
+  const fenced = open.filter((p) => !isExpired(p)); // expired stay listed below, not fenced (IM reserved until closed)
+
+  // live VM per open position, and what the POOL actually settles (the net)
+  const flows = fenced.map((p) => ({ p, vm: positionPnl(p) }));
+  const grossVm = flows.reduce((s, f) => s + Math.abs(f.vm), 0);
+  const netVm = flows.reduce((s, f) => s + f.vm, 0);
+  const coverage = maintenance > 0 ? free / maintenance : null;
 
   const pct = (v: number) => (equity > 0 ? Math.min(100, (v / equity) * 100) : 0);
   const color = (i: number) => CATEGORICAL[i % CATEGORICAL.length];
 
   return (
     <section className="rounded-[14px] border border-line-strong bg-surface">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line-strong px-6 py-4">
-        <div>
+      {/* what cross-margin MEANS, in one breath */}
+      <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 border-b border-line-strong px-6 py-4">
+        <div className="max-w-[560px]">
           <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-ink">Cross-margin — one pool backs every trade</h2>
-          <p className="mt-0.5 max-w-[520px] text-[12px] leading-[1.55] text-muted">
-            The bar is the desk&apos;s whole treasury. Each trade&apos;s initial margin is a colored <b>fence</b> inside it — an
-            accounting hold, never a transfer — so free capital (green) and even the fenced margin keep earning at venues.
+          <p className="mt-1 text-[12px] leading-[1.6] text-muted">
+            Positions here have <b>no separate collateral accounts</b>. Each trade&apos;s initial margin is a colored{" "}
+            <b>hold inside the one treasury bar</b> below (locked, never moved), and every mark-to-market cashflow
+            settles against the <b>same shared buffer</b> — a winner&apos;s gains automatically back a loser&apos;s
+            losses before any new capital is needed.
           </p>
         </div>
-        <div className="flex gap-6 font-mono text-[12px]">
-          <Stat label="Equity" value={usd(equity)} />
-          <Stat label="Fenced IM" value={usd(reserved)} color="#2456c4" />
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 font-mono text-[12px]">
+          <Stat label="Pool equity" value={usd(equity)} />
+          <Stat label="Locked IM" value={usd(reserved)} color="#2456c4" />
           <Stat label="Σ maintenance" value={usd(maintenance)} color={STATUS.red} />
-          <Stat label="Free" value={usd(free)} color={STATUS.green} />
+          <Stat label="Shared buffer" value={usd(free)} color={STATUS.green} />
+          <CoverageChip coverage={coverage} />
         </div>
       </div>
 
       {/* the pooled-treasury bar */}
       <div className="px-6 pb-1 pt-5">
-        <div className="relative pb-7 pt-4">
-          {/* Σ maintenance flag ABOVE the bar */}
+        <div className="relative pb-12 pt-4">
           {maintenance > 0 && (
             <div className="pointer-events-none absolute top-0 z-10 -translate-x-1/2" style={{ left: `${pct(maintenance)}%` }}>
               <span className="whitespace-nowrap rounded-[4px] px-1.5 py-0.5 font-mono text-[9.5px] font-bold text-white" style={{ background: STATUS.red }}>
-                maintenance floor {usd(maintenance)}
+                Σ-maintenance floor {usd(maintenance)} — the pool must never run below this
               </span>
             </div>
           )}
@@ -116,7 +127,7 @@ export default function MarginPanel({
               return (
                 <div
                   key={p.otcId}
-                  title={`${p.asset} ${p.side.toUpperCase()} vs ${p.cpty} — IM ${usd(p.im)} fenced`}
+                  title={`${p.asset} ${p.side.toUpperCase()} vs ${p.cpty} — IM ${usd(p.im)} locked (no separate account)`}
                   className="flex h-full items-center justify-center overflow-hidden border-r-2 border-surface transition-[width] duration-500"
                   style={{ width: `${w}%`, background: color(i) }}
                 >
@@ -128,41 +139,101 @@ export default function MarginPanel({
                 </div>
               );
             })}
-            <div className="flex h-full flex-1 items-center justify-center" title={`Free capital ${usd(free)} — deployable to venues`}>
+            <div className="flex h-full flex-1 items-center justify-center" title={`Shared VM buffer ${usd(free)} — every position settles against this same capital`}>
               {pct(free) > 14 && (
                 <span className="font-mono text-[10px] font-semibold" style={{ color: "#1a6042" }}>
-                  free {usd(free, { maximumFractionDigits: 0 })} · earning-eligible
+                  shared buffer {usd(free, { maximumFractionDigits: 0 })} · backs ALL positions · earning-eligible
                 </span>
               )}
             </div>
           </div>
-          {/* maintenance rule through the bar */}
           {maintenance > 0 && (
-            <div className="pointer-events-none absolute bottom-7 top-4" style={{ left: `${pct(maintenance)}%` }}>
+            <div className="pointer-events-none absolute bottom-12 top-4" style={{ left: `${pct(maintenance)}%` }}>
               <div className="h-full w-[2.5px]" style={{ background: STATUS.red }} />
             </div>
           )}
+          {/* bracket captions: fences vs shared buffer */}
+          <div className="absolute bottom-5 left-0 flex w-full font-mono text-[10px] uppercase tracking-[0.08em] text-muted">
+            {reserved > 0 && (
+              <span className="flex flex-col" style={{ width: `${pct(reserved)}%`, minWidth: 120 }}>
+                <span className="border-x border-b border-line-strong" style={{ height: 5 }} />
+                <span className="mt-1">locked IM — one hold per trade</span>
+              </span>
+            )}
+            <span className="flex flex-1 flex-col pl-2" style={{ minWidth: 140 }}>
+              <span className="border-x border-b border-line-strong" style={{ height: 5 }} />
+              <span className="mt-1" style={{ color: "#1a6042" }}>one shared VM buffer — not split per trade</span>
+            </span>
+          </div>
           <div className="absolute bottom-0 left-0 flex w-full justify-between font-mono text-[10px] uppercase tracking-[0.08em] text-muted">
-            <span>■ fenced IM per contract (colors match the rows below)</span>
-            <span>pool equity {usd(equity)}</span>
+            <span>■ colors match the position rows below</span>
+            <span>whole bar = pool equity {usd(equity)}</span>
           </div>
         </div>
       </div>
 
+      {/* the cross-margin EFFECT: VM nets at the pool */}
+      {flows.length > 0 && (
+        <div className="mx-6 mb-4 rounded-[10px] border border-line bg-bg/60 px-4 py-3">
+          <p className="font-mono text-[10.5px] uppercase tracking-[0.1em] text-muted">
+            VM netting — why cross-margin matters
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-2 text-[12.5px]">
+            {flows.map((f, i) => (
+              <span key={f.p.otcId} className="flex items-center gap-1.5">
+                {i > 0 && <span className="font-mono text-muted">+</span>}
+                <span className="flex items-center gap-1.5 rounded-[6px] border border-line px-2 py-1 font-mono text-[12px]">
+                  <span className="h-[9px] w-[9px] rounded-[2.5px]" style={{ background: color(fenced.indexOf(f.p)) }} />
+                  <span className="text-ink">{f.p.asset} {f.p.side === "long" ? "L" : "S"}</span>
+                  <span className="font-semibold" style={{ color: f.vm >= 0 ? "#1a6042" : "#9a2c1a" }}>
+                    {f.vm >= 0 ? "+" : "−"}{usd(Math.abs(f.vm))}
+                  </span>
+                </span>
+              </span>
+            ))}
+            <span className="font-mono text-[13px] text-muted">→</span>
+            <span className="rounded-[6px] px-2.5 py-1 font-mono text-[12px] font-bold text-white" style={{ background: netVm >= 0 ? "#1f6f4d" : "#b4341f" }}>
+              pool settles NET {netVm >= 0 ? "+" : "−"}{usd(Math.abs(netVm))}
+            </span>
+          </div>
+          <p className="mt-2 text-[11.5px] leading-[1.6] text-muted">
+            {flows.length > 1 ? (
+              <>
+                Siloed per-trade accounts would each move their own full leg — {usd(grossVm)} of gross collateral
+                traffic{grossVm - Math.abs(netVm) > 0.005 && (
+                  <>
+                    , of which <b className="text-ink">{usd(grossVm - Math.abs(netVm))} never needs to move here</b> because
+                    opposing positions offset inside the pool
+                  </>
+                )}. One buffer, one net settlement.
+              </>
+            ) : (
+              <>
+                This flow settles against the <b>shared buffer</b> — there is no per-trade account it could be trapped
+                in. Open an opposing position and the two VM legs net <i>before</i> touching the buffer: that offset is
+                the cross-margin saving.
+              </>
+            )}
+          </p>
+        </div>
+      )}
+
       {/* per-contract health rows */}
       <div className="divide-y divide-line border-t border-line">
         {real.length === 0 && (
-          <p className="px-6 py-4 text-[13px] text-muted">No open contracts yet — accept an RFQ quote or propose a direct trade.</p>
+          <p className="px-6 py-4 text-[13px] text-muted">No open contracts yet — accept an RFQ quote or propose a direct trade, and its locked IM appears inside the pool above.</p>
         )}
-        {real.map((p, i) => {
+        {real.map((p) => {
           const h = p.otcId ? health[p.otcId] : undefined;
           const status = liveStatus(p);
           const expired = isExpired(p);
+          const fi = fenced.findIndex((f) => f.otcId === p.otcId);
+          const vm = status === 0 && !expired ? positionPnl(p) : 0;
           const crankableNow = status === 0 && !expired && (h?.breached || h?.callDeadlineMs != null);
           return (
             <div key={p.otcId} className="flex flex-wrap items-center gap-x-4 gap-y-2 px-6 py-3 text-[13px]">
-              <span className="h-[12px] w-[12px] shrink-0 rounded-[3px]" style={{ background: status === 0 && !expired ? color(fenced.findIndex((f) => f.otcId === p.otcId)) : "var(--color-line-strong)" }} />
-              <div className="flex min-w-[210px] items-center gap-2.5">
+              <span className="h-[12px] w-[12px] shrink-0 rounded-[3px]" style={{ background: fi >= 0 ? color(fi) : "var(--color-line-strong)" }} />
+              <div className="flex min-w-[190px] items-center gap-2.5">
                 <span className="font-semibold text-ink">{p.asset}</span>
                 <span
                   className="rounded-[5px] px-1.5 py-0.5 text-[10.5px] font-semibold"
@@ -172,12 +243,20 @@ export default function MarginPanel({
                 </span>
                 <span className="text-muted">vs {p.cpty}</span>
               </div>
-              <span className="font-mono text-muted">
+              <span className="font-mono text-[12px] text-muted">
+                {usd(p.entry)} → <span className="text-ink">{usd(p.mark)}</span>
+              </span>
+              <span className="font-mono text-[12px] text-muted">
                 IM <span className="text-ink">{usd(p.im)}</span>
               </span>
-              <span className="font-mono text-muted">
+              <span className="font-mono text-[12px] text-muted">
                 maint <span className="text-ink">{usd(p.im * 0.7)}</span>
               </span>
+              {status === 0 && !expired && (
+                <span className="font-mono text-[12px] font-semibold" style={{ color: vm >= 0 ? "#1a6042" : "#9a2c1a" }}>
+                  VM {vm >= 0 ? "+" : "−"}{usd(Math.abs(vm))}
+                </span>
+              )}
               <HealthChip status={status} expired={expired} health={h} now={now} />
               {crankableNow ? (
                 <button
@@ -196,8 +275,35 @@ export default function MarginPanel({
         })}
       </div>
 
+      <p className="border-t border-line px-6 py-2.5 font-mono text-[10.5px] leading-[1.7] text-faint">
+        locked ≠ transferred (the pool stays whole — the locked IM is what rehypothecates to venues) · one Σ-maintenance
+        rule on the pool, not per trade · a breach is due process: margin call → cure window → only then liquidation,
+        crankable by anyone.
+      </p>
+
       {error && <p className="break-words px-6 py-3 text-[12px]" style={{ color: STATUS.red }}>{error}</p>}
     </section>
+  );
+}
+
+function CoverageChip({ coverage }: { coverage: number | null }) {
+  if (coverage == null) {
+    return (
+      <span className="rounded-[5px] px-2 py-1 font-mono text-[10.5px] font-semibold" style={{ background: "rgba(31,111,77,0.10)", color: "#1a6042" }}>
+        NO MAINTENANCE LOAD
+      </span>
+    );
+  }
+  const tone =
+    coverage >= 1.5
+      ? { background: "rgba(31,111,77,0.10)", color: "#1a6042", word: "SAFE" }
+      : coverage >= 1
+        ? { background: "rgba(138,109,26,0.12)", color: "#8a6d1a", word: "TIGHT" }
+        : { background: "rgba(180,52,31,0.14)", color: STATUS.red, word: "UNDER FLOOR" };
+  return (
+    <span className="rounded-[5px] px-2 py-1 font-mono text-[10.5px] font-semibold" style={{ background: tone.background, color: tone.color }} title="shared buffer ÷ Σ maintenance — the one number for desk health">
+      BUFFER {coverage >= 100 ? ">99" : coverage.toFixed(1)}× Σ-MAINT · {tone.word}
+    </span>
   );
 }
 

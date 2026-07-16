@@ -130,7 +130,22 @@ async function crank(c: SuiJsonRpcClient, kp: Ed25519Keypair, target: { otcId: s
       tx.object(CLOCK),
     ],
   });
-  const res = await c.signAndExecuteTransaction({ signer: kp, transaction: tx, options: { showEffects: true } });
+  // A crank that WOULD abort (e.g. code 77 while the cure window runs) fails at
+  // the SDK's dry-run/gas-estimation step and THROWS — it never reaches effects.
+  // A failed crank is a normal outcome for the tick/cure flows, so catch it and
+  // return ok:false instead of 500ing the whole action (which killed the
+  // client's market loop → frozen chart, no release, no redeposit).
+  let res;
+  try {
+    res = await c.signAndExecuteTransaction({ signer: kp, transaction: tx, options: { showEffects: true } });
+  } catch (e) {
+    return {
+      otcId: target.otcId,
+      ok: false as const,
+      digest: "",
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
   await c.waitForTransaction({ digest: res.digest });
   if (res.effects?.status.status !== "success") {
     return { otcId: target.otcId, ok: false as const, digest: res.digest, error: res.effects?.status.error };
@@ -151,7 +166,70 @@ async function crank(c: SuiJsonRpcClient, kp: Ed25519Keypair, target: { otcId: s
   return { otcId: target.otcId, ok: true as const, digest: res.digest, deadline, status };
 }
 
-/** Permissionless risk recall for `instId`; returns the recall digest. */
+/** A margin call is a dynamic field on the CONTRACT — resetting the ORACLE
+ *  (mark back to nominal, trigger cleared) does not touch it. A stale call is a
+ *  loaded gun: it stays pending through calm markets (cranks only run while
+ *  triggered, so the healthy-path auto-clear never fires), and the NEXT breach —
+ *  by either side — liquidates instantly against the old, already-aged window
+ *  instead of getting its own cure period (observed live 2026-07-12: spike
+ *  called the short, reset, crash 3 min later liquidated the LONG in 4s).
+ *  So on reset, crank each healthy contract that still carries a call:
+ *  `settle_on_breach`'s healthy path clears the call and moves no funds.
+ *  Contracts still breached at the reset mark are left alone (cranking those
+ *  could liquidate) and reported back as `stillCalled`. */
+async function clearStaleCalls(c: SuiJsonRpcClient, kp: Ed25519Keypair, otcIds: string[]) {
+  const cleared: string[] = [];
+  const stillCalled: string[] = [];
+  if (!otcIds.length) return { cleared, stillCalled };
+  const view = new Transaction();
+  for (const id of otcIds) {
+    view.moveCall({
+      target: TARGET.otc.mmBreached,
+      typeArguments: [DBUSDC_TYPE],
+      arguments: [view.object(id), view.object(SHARED.riskOracle), view.object(CLOCK)],
+    });
+    view.moveCall({ target: TARGET.otc.marginCallDeadline, typeArguments: [DBUSDC_TYPE], arguments: [view.object(id)] });
+  }
+  const [r, objs] = await Promise.all([
+    c.devInspectTransactionBlock({ sender: SHARED.riskOracle, transactionBlock: view }),
+    c.multiGetObjects({ ids: otcIds, options: { showContent: true } }),
+  ]);
+  const now = Date.now();
+  for (let i = 0; i < otcIds.length; i++) {
+    const breached = (r.results?.[2 * i]?.returnValues?.[0]?.[0] as number[] | undefined)?.[0] === 1;
+    const hasCall = ((r.results?.[2 * i + 1]?.returnValues?.[0]?.[0] ?? []) as number[])[0] === 1;
+    const f = (objs[i]?.data?.content as { fields?: Record<string, string> } | undefined)?.fields;
+    if (!f || Number(f.status ?? "0") !== 0 || !hasCall) continue;
+    const expiry = Number(f.expiry_ms ?? "0");
+    if (expiry > 0 && now >= expiry) continue; // expired → crank aborts 78; close() handles these
+    if (breached) {
+      stillCalled.push(otcIds[i]); // live call on a live breach — not ours to defuse
+      continue;
+    }
+    const crankTx = new Transaction();
+    crankTx.moveCall({
+      target: TARGET.otc.settleOnBreach,
+      typeArguments: [DBUSDC_TYPE],
+      arguments: [
+        crankTx.object(otcIds[i]),
+        crankTx.object(f.inst_long!),
+        crankTx.object(f.inst_short!),
+        crankTx.object(SHARED.riskOracle),
+        crankTx.object(SHARED.otcAllowlist),
+        crankTx.object(CLOCK),
+      ],
+    });
+    const res = await c.signAndExecuteTransaction({ signer: kp, transaction: crankTx, options: { showEffects: true } });
+    await c.waitForTransaction({ digest: res.digest });
+    if (res.effects?.status.status === "success") cleared.push(otcIds[i]);
+    else stillCalled.push(otcIds[i]);
+  }
+  return { cleared, stillCalled };
+}
+
+/** Permissionless risk recall for `instId`; returns the recall digest.
+ *  Same dry-run-throw hazard as `crank` (e.g. abort 63 if the trigger released
+ *  between the status read and the tx) — a failed recall must not 500 the tick. */
 async function recallOnTrigger(c: SuiJsonRpcClient, kp: Ed25519Keypair, instId: string) {
   const recall = new Transaction();
   recall.moveCall({
@@ -166,7 +244,12 @@ async function recallOnTrigger(c: SuiJsonRpcClient, kp: Ed25519Keypair, instId: 
       recall.object(CLOCK),
     ],
   });
-  const rr = await c.signAndExecuteTransaction({ signer: kp, transaction: recall, options: { showEffects: true } });
+  let rr;
+  try {
+    rr = await c.signAndExecuteTransaction({ signer: kp, transaction: recall, options: { showEffects: true } });
+  } catch {
+    return { ok: false, digest: "" };
+  }
   await c.waitForTransaction({ digest: rr.digest });
   return { ok: rr.effects?.status.status === "success", digest: rr.digest };
 }
@@ -354,6 +437,17 @@ export async function POST(request: Request) {
     await c.waitForTransaction({ digest: res.digest });
     if (res.effects?.status.status !== "success") {
       return Response.json({ error: JSON.stringify(res.effects?.status) }, { status: 502 });
+    }
+    // reset also defuses stale margin calls on the armed contracts (see helper)
+    if (action === "reset") {
+      const drill: string[] = Array.isArray(otcIds) ? otcIds.filter((x) => typeof x === "string") : [];
+      const sweep = await clearStaleCalls(c, kp, drill);
+      return Response.json({
+        digest: res.digest,
+        ...(await readStatus(c)),
+        clearedCalls: sweep.cleared,
+        stillCalled: sweep.stillCalled,
+      });
     }
     return Response.json({ digest: res.digest, ...(await readStatus(c)) });
   } catch (e) {
