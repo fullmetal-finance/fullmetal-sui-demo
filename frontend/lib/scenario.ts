@@ -7,7 +7,7 @@
 /*  and ~3 calm prints after σ decays the latch auto-releases.         */
 /* ------------------------------------------------------------------ */
 
-export type MarketEventKind = "crash" | "gap" | "spike" | "calm";
+export type MarketEventKind = "crash" | "spike" | "calm";
 
 export type MarketSim = {
   /** queue a regime event; it lands on the next tick */
@@ -39,17 +39,30 @@ export function createMarketSim(startPrice: number): MarketSim {
         // PRE-EMPTED crash — how real crashes arrive (vol clusters): tremors
         // first. The first −3…4% print is already a z ≫ 4σ shock against a
         // calm ~50 bps regime, so the trigger latches and the permissionless
-        // recall brings collateral home BEFORE the main gap two prints later.
-        // Cumulative −19…21% (drill window unchanged).
+        // recall brings collateral home BEFORE the main move two prints later.
+        // Cumulative −19…21%.
         queue = [
           { ret: -(0.03 + Math.random() * 0.01), vol: 220 }, // tremor: latch + recall
           { ret: -(0.04 + Math.random() * 0.01), vol: 360 }, // escalation
-          { ret: -(0.12 + Math.random() * 0.012), vol: 520 }, // the main gap — money already out
+          { ret: -(0.12 + Math.random() * 0.012), vol: 520 }, // the main leg — money already out
         ];
         pending = null;
         return;
       }
-      pending = kind;
+      if (kind === "spike") {
+        // Gradual squeeze UP, same clustering as a crash but upward. The EWMA
+        // is symmetric (|return|), so the first +3…4% print is a z ≫ 4σ shock
+        // that latches the trigger and recalls collateral BEFORE the +12…13%
+        // main leg. Cumulative +19…21%.
+        queue = [
+          { ret: +(0.03 + Math.random() * 0.01), vol: 220 }, // tremor: latch + recall
+          { ret: +(0.04 + Math.random() * 0.01), vol: 360 }, // escalation
+          { ret: +(0.12 + Math.random() * 0.012), vol: 520 }, // the main squeeze — money already out
+        ];
+        pending = null;
+        return;
+      }
+      pending = kind; // "calm"
     },
     vol: () => Math.round(volBps),
     next(): number {
@@ -58,23 +71,6 @@ export function createMarketSim(startPrice: number): MarketSim {
         level = level * (1 + step.ret);
         anchor = level;
         volBps = step.vol;
-        return round(level);
-      }
-      if (pending === "gap") {
-        pending = null;
-        // NO-WARNING single gap (−19…21%): funds are still deployed when the
-        // breach cranks — this is the margin-call / due-process drill.
-        // (VM owed $28–31 on 1 SPCX @ ~$148 — a $34 desk always calls, always cures.)
-        level = level * (1 - (0.19 + Math.random() * 0.02));
-        anchor = level;
-        volBps = 520; // violent aftermath, decays below
-        return round(level);
-      }
-      if (pending === "spike") {
-        pending = null;
-        level = level * (1 + (0.18 + Math.random() * 0.05)); // +18…23% squeeze
-        anchor = level;
-        volBps = 520;
         return round(level);
       }
       if (pending === "calm") {

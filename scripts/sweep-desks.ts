@@ -19,7 +19,7 @@ import { Transaction } from '@mysten/sui/transactions';
 
 import { TESTNET_JSONRPC_URL } from './rpc';
 
-const PKG = '0xf8b57f09dfe5e59fcc176110c8f15cf96b27f6f23be8a4db959529d896635a4a';
+const PKG = '0x141f7de4ea75cde406d424a0669e17e34352ef9fd594bcae6f0139ef6dd74700';
 const ORIGINAL_PKG = '0x3dfbfa5254f00a0b501ebfdf449f044340e09f0629b37dfa7d834130157dfddf';
 const DBUSDC = '0xf7152c05930480cd740d7311b5b8b45c6f488e3a53a11c3f74a6fac36a52e0d7::DBUSDC::DBUSDC';
 const MARGIN_POOL = '0xf08568da93834e1ee04f09902ac7b1e78d3fdf113ab4d2106c7265e95318b14d';
@@ -75,7 +75,12 @@ async function main() {
     const reserved = BigInt(f.reserved ?? '0');
     const rehyp = BigInt(f.rehypothecated ?? '0');
     const isScratch = SCRATCH.test(handle);
-    const isMaker = ['cumberland', 'galaxy', 'wintermute'].some((m) => handle.includes(m));
+    // match makers by INSTITUTION id (same prefixes /api/makers routes quotes
+    // through) — handles are arbitrary (@goldwomansocks IS "Galaxy Digital")
+    const MAKER_INSTS = ['0xf6de982c', '0x31089de7', '0xfb4db2ec'];
+    const isMaker =
+      MAKER_INSTS.some((p) => inst.startsWith(p)) ||
+      ['cumberland', 'galaxy', 'wintermute'].some((m) => handle.includes(m));
     if (!isScratch && !isMaker) continue;
 
     const tx = new Transaction();

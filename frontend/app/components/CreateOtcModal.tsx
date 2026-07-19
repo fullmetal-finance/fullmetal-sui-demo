@@ -48,6 +48,18 @@ export default function CreateOtcModal({
   const [strikeTouched, setStrikeTouched] = useState(false);
   const [liveMark, setLiveMark] = useState<number | null>(null);
 
+  // Reopening after a successful create must show a FRESH form — reset the
+  // success screen (and any stale error/busy) whenever the modal opens, so the
+  // second "New OTC contract" click no longer shows the previous contract id
+  // until a page refresh.
+  useEffect(() => {
+    if (open) {
+      setDone(null);
+      setError(null);
+      setBusy(false);
+    }
+  }, [open]);
+
   // live oracle mark while the modal is open — the same feed contracts settle on
   useEffect(() => {
     if (!open || done) return;
@@ -75,7 +87,12 @@ export default function CreateOtcModal({
     }
   }, [liveMark, strikeTouched, asset]);
 
-  const notionalUsd = notional * strike;
+  // For an RFQ the maker sets the price, so size the collateral estimate off the
+  // live oracle mark (what makers quote around) — NOT the direct-form `strike`.
+  // Editing a direct strike must not move the RFQ margin requirement; it
+  // finalises against the actual quote you accept.
+  const refPrice = entry === "rfq" && liveMark && liveMark > 0 ? liveMark : strike;
+  const notionalUsd = notional * refPrice;
   const minIm = Math.max(PROTOCOL_MIN_IM, notionalUsd * MIN_IM_PCT);
 
   // prefill IM from notional×strike until the user edits it (ceil — a rounded-
@@ -93,6 +110,28 @@ export default function CreateOtcModal({
     if (entry === "direct" && (!counterparty.trim() || strike <= 0)) return false;
     return true;
   }, [notional, im, asset, imValid, entry, counterparty, strike]);
+
+  // Discreet demo prefill — fills whichever entry mode is currently selected.
+  //   direct → SHORT SPCX vs Cumberland, 1 unit, forward 160, $8 IM each side
+  //   rfq    → go LONG SPCX, 1.5 units; IM tracks the live mark (maker sets price)
+  function fillDemo() {
+    setError(null);
+    setAsset("SPCX");
+    if (entry === "direct") {
+      setSide("short");
+      setCounterparty("cumberland");
+      setNotional(1);
+      setStrike(160);
+      setStrikeTouched(true); // pin the strike at 160 (don't snap to live mark)
+      setIm(8);
+      setImTouched(true); // pin IM at $8 (don't re-prefill from notional)
+    } else {
+      setSide("long");
+      setNotional(1.5);
+      setStrikeTouched(false); // strike is the maker's to set; let it track the mark
+      setImTouched(false); // IM prefills from the live mark (≈ $11 at ~$148 × 1.5)
+    }
+  }
 
   if (!open) return null;
 
@@ -136,7 +175,23 @@ export default function CreateOtcModal({
       >
         <div className="flex items-center justify-between">
           <h2 className="text-[18px] tracking-[-0.01em]">New OTC contract</h2>
-          <button onClick={onClose} className="text-[18px] text-muted hover:text-ink">×</button>
+          <div className="flex items-center gap-3.5">
+            {!done && (
+              <button
+                type="button"
+                onClick={fillDemo}
+                title={
+                  entry === "direct"
+                    ? "Prefill a sample short SPCX vs Cumberland (forward 160, $8 IM)"
+                    : "Prefill a sample long SPCX RFQ (1.5 units; maker sets price)"
+                }
+                className="font-mono text-[11px] text-faint transition-colors hover:text-muted"
+              >
+                ⚡ demo fill
+              </button>
+            )}
+            <button onClick={onClose} className="text-[18px] text-muted hover:text-ink">×</button>
+          </div>
         </div>
 
         {done ? (
@@ -154,7 +209,7 @@ export default function CreateOtcModal({
                 ]}
               />
               {entry === "direct" ? (
-                <Labeled label="Counterparty" hint="org handle or institution id">
+                <Labeled label="Counterparty" hint="institution id">
                   <input
                     className={input}
                     value={counterparty}
@@ -202,12 +257,12 @@ export default function CreateOtcModal({
                 <Labeled label="Asset">
                   <input className={input} value={asset} onChange={(e) => setAsset(e.target.value.toUpperCase())} placeholder="SPCX" />
                 </Labeled>
-                <Labeled label="Notional" hint="units of underlying — fractional OK (min 0.000001)">
+                <Labeled label="Notional" hint="units of underlying">
                   <input className={input} type="number" step="0.1" min="0" value={notional} onChange={(e) => setNotional(+e.target.value)} />
                 </Labeled>
               </div>
               {entry === "direct" && (
-                <Labeled label="Forward price / strike" hint="agreed settlement level (USD) — tracks the live mark until you edit it">
+                <Labeled label="Forward price / strike" hint="agreed settlement level (USD)">
                   <div className="flex items-center gap-1.5">
                     <input
                       className={input}
@@ -275,9 +330,6 @@ export default function CreateOtcModal({
                   </select>
                 </Labeled>
               </div>
-              <p className="mt-2 text-[11px] leading-[1.6] text-faint">
-                Offer-expiry bounds the unaccepted offer · maturity bounds the live trade · settlement is the recurring mark-to-market.
-              </p>
             </Section>
 
             {/* Collateral & rehypothecation */}

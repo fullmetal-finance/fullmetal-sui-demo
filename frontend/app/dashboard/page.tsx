@@ -15,14 +15,14 @@ import TradersPanel from "../components/TradersPanel";
 import QuotesInbox from "../components/QuotesInbox";
 import MarketRfqs from "../components/MarketRfqs";
 import RatesBar from "../components/RatesBar";
-import { DBUSDC_TYPE, TARGET, explorer, usd } from "@/lib/fullmetal";
+import { DBUSDC_TYPE, FAUCET_ADDRESS, TARGET, explorer, toUnits, usd } from "@/lib/fullmetal";
 import { clearInstitution, loadInstitution, saveInstitution, type InstitutionRecord } from "@/lib/store";
-import { readAcceptedOffers, readInstitution, readUserContracts, type InstState } from "@/lib/institution-state";
+import { readAcceptedOffers, readInstitution, readOracle, readUserContracts, type InstState } from "@/lib/institution-state";
 import { clearSimVenues } from "@/lib/venues";
 import { useSponsoredExecute } from "@/lib/sponsored";
 import { useMakerQuotes } from "@/lib/use-maker-quotes";
 import type { OtcResult } from "@/lib/otc";
-import { MOCK_INCOMING_RFQS, MOCK_POSITIONS, positionPnl, type MockPosition } from "@/lib/mock";
+import { MOCK_INCOMING_RFQS, positionPnl, type MockPosition } from "@/lib/mock";
 
 type Tab = "positions" | "engine" | "rfq";
 
@@ -32,6 +32,7 @@ export default function Dashboard() {
   const [mounted, setMounted] = useState(false);
   const [rec, setRec] = useState<InstitutionRecord | null>(null);
   const [state, setState] = useState<InstState | null>(null);
+  const [mark, setMark] = useState<number | null>(null); // live oracle mark (for MTM projections)
   const [positions, setPositions] = useState<MockPosition[]>([]);
   const [tab, setTab] = useState<Tab>("positions");
   const [otcOpen, setOtcOpen] = useState(false);
@@ -84,11 +85,17 @@ export default function Dashboard() {
     [refresh],
   );
 
-  // keep balances live without a manual refresh
+  // keep balances + the live mark fresh without a manual refresh. 2.5s keeps
+  // the projected-settlement/treasury tiles tracking the oracle mark closely as
+  // the market ticks (they mark the desk's open positions to the live price).
   useEffect(() => {
     if (!rec) return;
-    refresh(rec.institutionId);
-    const t = setInterval(() => refresh(rec.institutionId), 4000);
+    const tick = () => {
+      refresh(rec.institutionId);
+      readOracle().then((o) => setMark(o.mark)).catch(() => {});
+    };
+    tick();
+    const t = setInterval(tick, 2500);
     return () => clearInterval(t);
   }, [rec, refresh]);
 
@@ -149,6 +156,37 @@ export default function Dashboard() {
     setPositions([]);
   }
 
+  // Return the desk's FREE, liquid DBUSDC to the faucet wallet (locked IM and
+  // anything deployed at a venue stay put). Gasless. For post-demo cleanup.
+  const [returning, setReturning] = useState(false);
+  async function returnToFaucet() {
+    if (!account || !rec || !state) return;
+    const amt = Math.floor(Math.min(state.available, state.liquid) * 100) / 100;
+    if (amt < 0.01) {
+      setResetMsg("Nothing free to return — the desk's funds are locked as IM or deployed at a venue (recall first).");
+      return;
+    }
+    if (!window.confirm(`Return ${usd(amt)} of free DBUSDC to the faucet?\n\nLocked IM and venue deposits stay with your open positions.`)) return;
+    setReturning(true);
+    setResetMsg(null);
+    try {
+      await sponsoredExecute((tx) => {
+        const coin = tx.moveCall({
+          target: TARGET.institution.withdraw,
+          typeArguments: [DBUSDC_TYPE],
+          arguments: [tx.object(rec.institutionId), tx.object(rec.adminCapId), tx.pure.u64(toUnits(amt))],
+        });
+        tx.transferObjects([coin], FAUCET_ADDRESS);
+      });
+      await sync(rec.institutionId);
+      setResetMsg(`✓ Returned ${usd(amt)} to the faucet.`);
+    } catch (e) {
+      setResetMsg(`Return to faucet failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setReturning(false);
+    }
+  }
+
   async function fund(amount: number) {
     if (!account || !rec) throw new Error("No institution.");
     const r = await fetch("/api/faucet", {
@@ -169,20 +207,44 @@ export default function Dashboard() {
     await sync(rec.institutionId);
   }
 
-  function onOtcCreated(res: OtcResult) {
+  async function onOtcCreated(res: OtcResult) {
     reload();
     if (rec) sync(rec.institutionId);
-    // RFQ broadcast: nothing else to do — useMakerQuotes sees the new rfqId,
-    // kicks the desks, and the badge bumps when their quotes land on-chain.
-    void res;
+    // RFQ broadcast: useMakerQuotes sees the new rfqId, kicks the desks, and the
+    // badge bumps when quotes land. DIRECT to a maker desk: ask the ops-run desk
+    // to accept (they don't sit at a browser) — a direct trade only becomes a
+    // contract on acceptance. The readAcceptedOffers poll then folds the opened
+    // OtcForward into the blotter + cross-margin. A REAL counterparty is left
+    // pending for them to accept from their own UI.
+    if (res.kind === "direct") {
+      try {
+        await fetch("/api/accept-direct", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ offerId: res.offerId }),
+        });
+      } catch {
+        /* maker service offline — the offer stays pending; accept-direct.ts is the fallback */
+      }
+      if (rec) sync(rec.institutionId);
+    }
   }
 
-  // net variation margin that would settle in the next 24h cycle across the
-  // desk's book (real on-chain contracts + demo positions). + = received, − = paid.
-  const projectedSettlement = [...positions, ...MOCK_POSITIONS].reduce(
-    (sum, p) => sum + positionPnl(p),
-    0,
-  );
+  // Net variation margin the desk's OWN OPEN contracts would settle at the live
+  // mark — a projection (unrealized), NOT money that has moved. Real positions
+  // only (the mock roster is illustrative and must not distort the desk's real
+  // numbers). SPCX legs are marked to the live oracle price; others to their
+  // last on-chain mark. + = would receive, − = would pay.
+  // mark the desk's SPCX positions to the LIVE oracle price so the blotter's
+  // Mark column, the cross-margin VM, and the projections all track the market
+  const livePositions = mark
+    ? positions.map((p) => (p.asset === "SPCX" ? { ...p, mark } : p))
+    : positions;
+  const projectedSettlement = livePositions
+    .filter((p) => p.otcId && (p.status ?? 0) === 0 && !((p.expiryMs ?? 0) > 0 && Date.now() >= (p.expiryMs ?? 0)))
+    .reduce((sum, p) => sum + positionPnl(p), 0);
+  // What the actual treasury becomes if those open positions settle now.
+  const projectedTreasury = (state?.equity ?? 0) + projectedSettlement;
 
   return (
     <div className="min-h-screen">
@@ -215,6 +277,14 @@ export default function Dashboard() {
                   <span>@{rec.handle}</span>
                   <a href={explorer.object(rec.institutionId)} target="_blank" rel="noreferrer" className="underline hover:text-ink">inst {rec.institutionId.slice(0, 6)}… ↗</a>
                   <button
+                    onClick={returnToFaucet}
+                    disabled={returning}
+                    title="Return the desk's free DBUSDC to the faucet wallet (locked IM & venue deposits stay)"
+                    className="underline decoration-dotted underline-offset-2 hover:text-ink disabled:opacity-50"
+                  >
+                    {returning ? "↩ returning…" : "↩ return to faucet"}
+                  </button>
+                  <button
                     onClick={doResetDesk}
                     title="Clear this account's local records and reopen onboarding (no transactions)"
                     className="underline decoration-dotted underline-offset-2 hover:text-ink"
@@ -229,17 +299,24 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* treasury strip */}
-            <div className="mt-8 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
-              <BigStat label="Total capital" value={state ? usd(state.equity) : "—"} sub="treasury + deployed" accent />
-              <BigStat label="Available" value={state ? usd(state.available) : "—"} sub="free to deploy" />
-              <BigStat label="Reserved IM" value={state ? usd(state.reserved) : "—"} />
+            {/* treasury strip — one compact row: actual holdings (real, on-chain)
+                then deployed + forward-looking projections at the mark */}
+            <div className="mt-8 grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-6">
+              <BigStat label="Total capital" value={state ? usd(state.equity) : "—"} sub="held now" accent />
+              <BigStat label="Available" value={state ? usd(state.available) : "—"} sub="free now" />
+              <BigStat label="Reserved IM" value={state ? usd(state.reserved) : "—"} sub="locked" />
               <BigStat label="Rehypothecated" value={state ? usd(state.rehypothecated) : "—"} sub="in DeepBook" />
               <BigStat
-                label="Projected 24h settlement"
-                value={`${projectedSettlement >= 0 ? "+" : "−"}${usd(Math.abs(projectedSettlement), { maximumFractionDigits: 0 })}`}
-                sub={projectedSettlement >= 0 ? "net VM to receive" : "net VM to pay"}
-                tone={projectedSettlement >= 0 ? "up" : "down"}
+                label="Projected treasury"
+                value={state ? usd(projectedTreasury) : "—"}
+                sub="at live mark"
+                tone={projectedSettlement > 0.005 ? "up" : projectedSettlement < -0.005 ? "down" : undefined}
+              />
+              <BigStat
+                label="Proj. 24h settle"
+                value={`${projectedSettlement >= 0 ? "+" : "−"}${usd(Math.abs(projectedSettlement))}`}
+                sub={projectedSettlement >= 0 ? "net VM in" : "net VM out"}
+                tone={projectedSettlement > 0.005 ? "up" : projectedSettlement < -0.005 ? "down" : undefined}
               />
             </div>
 
@@ -269,14 +346,19 @@ export default function Dashboard() {
               >
                 {tab === "positions" && (
                   <div className="space-y-6">
-                    <MarginPanel state={state} positions={positions} onRefresh={() => sync(rec.institutionId)} />
-                    <Blotter real={positions} />
+                    <MarginPanel state={state} positions={livePositions} onRefresh={() => sync(rec.institutionId)} />
+                    <Blotter real={livePositions} onRefresh={() => sync(rec.institutionId)} />
                     <TradersPanel />
                   </div>
                 )}
-                {tab === "engine" && (
+                {/* The collateral manager runs the live-market loop. Keep it
+                    MOUNTED across tab switches (hidden, not unmounted) so the
+                    ticker keeps streaming while you watch the margin panel on
+                    the Positions tab — unmounting it killed the market. */}
+                <div className={tab === "engine" ? "" : "hidden"}>
                   <RehypoHero
                     instId={rec.institutionId}
+                    adminCapId={rec.adminCapId}
                     state={state}
                     // arm only OPEN, UNEXPIRED contracts (settle_on_breach aborts
                     // on expired ones — those settle via close)
@@ -290,7 +372,7 @@ export default function Dashboard() {
                     )}
                     onRefresh={() => sync(rec.institutionId)}
                   />
-                )}
+                </div>
                 {tab === "rfq" && (
                   <div className="space-y-6">
                     <QuotesInbox
@@ -338,10 +420,10 @@ function PanelTab({ active, onClick, children }: { active: boolean; onClick: () 
 function BigStat({ label, value, sub, accent, tone }: { label: string; value: string; sub?: string; accent?: boolean; tone?: "up" | "down" }) {
   const valueColor = tone === "up" ? "text-[#1a6042]" : tone === "down" ? "text-[#9a2c1a]" : "text-ink";
   return (
-    <div className={`rounded-[14px] border bg-surface px-6 py-5 ${accent ? "border-line-strong" : "border-line"}`}>
-      <p className="text-[11px] font-semibold uppercase tracking-[0.13em] text-muted">{label}</p>
-      <p className={`mt-2.5 font-mono text-[26px] font-semibold tracking-[-0.01em] ${valueColor}`}>{value}</p>
-      {sub && <p className="mt-0.5 text-[12px] text-muted">{sub}</p>}
+    <div className={`rounded-[12px] border bg-surface px-3.5 py-3 ${accent ? "border-line-strong" : "border-line"}`}>
+      <p className="truncate text-[9.5px] font-semibold uppercase tracking-[0.1em] text-muted">{label}</p>
+      <p className={`mt-1.5 font-mono text-[19px] font-semibold tracking-[-0.01em] ${valueColor}`}>{value}</p>
+      {sub && <p className="mt-0.5 text-[10px] leading-tight text-muted">{sub}</p>}
     </div>
   );
 }

@@ -31,6 +31,20 @@ const EMPTY: Profile = {
   handle: "",
 };
 
+// Demo institution — the "Auto-fill" button drops this straight into the form.
+// (phone + jurisdiction are inferred from the Mumbai address; edit freely.)
+const DEMO_PROFILE: Profile = {
+  adminName: "Adrija Chakravorty",
+  legalName: "Fullmetal-Brotherhood",
+  email: "adrija@fullmetal.final",
+  phone: "+91 22 6789 0100",
+  address: "Shahid Bhagat Singh Marg, Fort, Mumbai - 400001",
+  jurisdiction: "Mumbai, India",
+  handle: "fullmetal-brotherhood",
+};
+// Served from frontend/public — see the note at the end of this change.
+const DEMO_LOGO = "/fullmetal-brotherhood-mock-logo.png";
+
 export default function Onboarding() {
   const account = useCurrentAccount();
   const router = useRouter();
@@ -58,6 +72,12 @@ export default function Onboarding() {
   const set = (k: keyof Profile) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setP((prev) => ({ ...prev, [k]: e.target.value }));
 
+  // demo convenience: fill every field + the logo with the Fullmetal-Brotherhood profile
+  const autofill = () => {
+    setP(DEMO_PROFILE);
+    setLogo(DEMO_LOGO);
+  };
+
   const profileComplete = Boolean(
     p.adminName.trim() && p.legalName.trim() && p.email.trim() && p.handle.trim(),
   );
@@ -80,10 +100,26 @@ export default function Onboarding() {
         digest,
         options: { showObjectChanges: true },
       });
+      const institutionId = createdId(full, "::institution::Institution<");
+      const adminCapId = createdId(full, "::institution::AdminCap");
+      // policy default: the WHOLE locked IM is deployable — zero the on-chain
+      // liquidity floor (protocol default holds back 25% of IM). Best-effort:
+      // the Floor-policy control in the collateral manager can set it anytime.
+      try {
+        await sponsoredExecute((tx) => {
+          tx.moveCall({
+            target: TARGET.router.setLiquidityFloor,
+            typeArguments: [DBUSDC_TYPE],
+            arguments: [tx.object(institutionId), tx.object(adminCapId), tx.pure.u64(0n), tx.pure.u16(0)],
+          });
+        });
+      } catch (e) {
+        console.warn("[fullmetal] floor-policy init skipped (set it in the collateral manager):", e);
+      }
       saveInstitution(account.address, {
         handle: p.handle,
-        institutionId: createdId(full, "::institution::Institution<"),
-        adminCapId: createdId(full, "::institution::AdminCap"),
+        institutionId,
+        adminCapId,
         profile: {
           adminName: p.adminName,
           legalName: p.legalName,
@@ -131,9 +167,16 @@ export default function Onboarding() {
           <section className="rounded-[16px] border-[0.5px] border-line bg-surface p-7 sm:p-9">
             <div className="flex items-center justify-between">
               <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">
-                Step 1 · Institution profile
+                Create new institution profile
               </p>
-              <p className="font-mono text-[11px] tracking-[0.12em] text-faint">1 / 3</p>
+              <button
+                type="button"
+                onClick={autofill}
+                title="Fill the form with the Fullmetal-Brotherhood demo profile"
+                className="rounded-[6px] border-[0.5px] border-line bg-bg px-2.5 py-1 font-mono text-[11px] tracking-[0.12em] text-faint transition-colors hover:border-line-strong hover:text-muted"
+              >
+                Auto-fill
+              </button>
             </div>
 
             <div className="mt-7 grid gap-5">
@@ -170,7 +213,7 @@ export default function Onboarding() {
                     onChange={(e) =>
                       setP((prev) => ({
                         ...prev,
-                        handle: e.target.value.toLowerCase().replace(/[^a-z0-9]/g, ""),
+                        handle: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ""),
                       }))
                     }
                     placeholder="goldwomansocks"
@@ -183,7 +226,12 @@ export default function Onboarding() {
                   <span className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-[7px] border-[0.5px] border-line bg-bg">
                     {logo ? (
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img src={logo} alt="logo preview" className="h-full w-full object-cover" />
+                      <img
+                        src={logo}
+                        alt="logo preview"
+                        className="h-full w-full object-cover"
+                        onError={() => setLogo(null)}
+                      />
                     ) : (
                       <span className="text-[18px] text-faint">+</span>
                     )}

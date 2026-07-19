@@ -140,11 +140,19 @@ function RfqBlock({
   busy: string | null;
   onAccept: (q: DeskQuote) => void;
 }) {
+  const bestPrice = s.quotes.length
+    ? s.side === "long"
+      ? Math.min(...s.quotes.map((q) => q.price))
+      : Math.max(...s.quotes.map((q) => q.price))
+    : 0;
   return (
     <div className="border-b border-line last:border-b-0">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 bg-bg/50 px-6 py-2.5 font-mono text-[11.5px] text-muted">
         <span className="font-semibold text-ink">{s.underlying}</span>
         <span>{s.notional} unit{s.notional === 1 ? "" : "s"}</span>
+        {bestPrice > 0 && (
+          <span className="text-ink">≈ {usd(s.notional * bestPrice, { maximumFractionDigits: 0 })} notional</span>
+        )}
         <span
           className="rounded-[4px] px-1.5 py-0.5 text-[10px] font-semibold"
           style={s.side === "long" ? { background: "rgba(31,111,77,0.12)", color: "#1a6042" } : { background: "rgba(180,52,31,0.12)", color: "#9a2c1a" }}

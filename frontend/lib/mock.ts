@@ -29,13 +29,14 @@ export type MockPosition = {
   maturity: string;
   venue: string; // rehypothecation venue
   otcId?: string; // real (on-chain) rows carry the OtcForward id
+  cptyId?: string; // real rows: the counterparty institution id (full)
   status?: number; // real rows: 0 active · 1 settled · 2 liquidated
   expiryMs?: number; // real rows: contract expiry (0 = perpetual)
 };
 
 export const MOCK_POSITIONS: MockPosition[] = [
-  { asset: "SPCX", side: "long", trader: "A. Whitfield", cpty: "Cumberland", notional: 925_000, entry: 142.7, mark: 148.0, im: 92_500, maturity: "30d", venue: "DeepBook" },
-  { asset: "SPCX", side: "short", trader: "M. Okonkwo", cpty: "Galaxy", notional: 555_000, entry: 150.9, mark: 148.0, im: 55_500, maturity: "Perp", venue: "Suilend" },
+  { asset: "AAPL", side: "long", trader: "A. Whitfield", cpty: "Cumberland", notional: 925_000, entry: 232.5, mark: 241.8, im: 92_500, maturity: "30d", venue: "DeepBook" },
+  { asset: "JPY", side: "short", trader: "M. Okonkwo", cpty: "Galaxy", notional: 555_000, entry: 157.9, mark: 156.4, im: 55_500, maturity: "Perp", venue: "Suilend" },
   { asset: "BTC", side: "long", trader: "A. Whitfield", cpty: "Wintermute", notional: 1_200_000, entry: 64_200, mark: 66_800, im: 120_000, maturity: "7d", venue: "Navi" },
 ];
 

@@ -160,7 +160,10 @@ correlation credit *is* cross-margining.
 
 $$Y^{max} = \max\big(0,\; E - R - F\big)$$
 
-Everything above the floor and the encumbrance may earn; nothing below may. This is
+Everything above the floor and the encumbrance may earn; nothing below may.
+*(Production target. The MVP deploys a deliberately smaller set — **only the
+reserved IM $R$**, with free liquidity/VM staying in the treasury — until this
+control loop is backtest-calibrated; see WHITEPAPER §1.)* This is
 also the crypto-native translation of the one quantitative rehypothecation limit TradFi
 ever wrote down: SEC 15c3-3 caps what a broker may re-use at **140% of the customer's
 debit balance**, segregating the excess ([17 CFR 240.15c3-3(a)(5)]) — a hard linear

@@ -2,14 +2,17 @@
 
 import Image from "next/image";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useCurrentAccount } from "@mysten/dapp-kit-react";
 
-import { DEEPBOOK, SPCX, SPCX_VOL, explorer, usd } from "@/lib/fullmetal";
+import { DBUSDC_TYPE, DEEPBOOK, SPCX, SPCX_VOL, TARGET, explorer, usd } from "@/lib/fullmetal";
 import type { InstState } from "@/lib/institution-state";
 import { readFloor, readInstitution, readSuppliedValue } from "@/lib/institution-state";
 import { cureCalls, friendlyMoveError, oracleStatus, pushTick, resetOracle, triggerAndRecall, type OracleResult } from "@/lib/oracle";
-import { STATUS, VENUE_ACCENT } from "@/lib/palette";
+import { FLOW, STATUS, VENUE_ACCENT } from "@/lib/palette";
 import { useRates } from "@/lib/rates";
 import { useRecall, useRehypothecate } from "@/lib/rehypo-actions";
+import { useSponsoredExecute } from "@/lib/sponsored";
+import { suiRead } from "@/lib/sui";
 import { createMarketSim, type MarketEventKind, type MarketSim } from "@/lib/scenario";
 import { loadSimVenues, simAccrued, simDeposit, simValue, simWithdraw, simWithdrawAll, type SimVenues } from "@/lib/venues";
 import ScenarioChart, { type ChartEvent, type ChartPoint } from "./ScenarioChart";
@@ -22,20 +25,25 @@ const CADENCE_MS = 1500; // min gap between prints (tx latency usually dominates
 
 export default function RehypoHero({
   instId,
+  adminCapId,
   state,
   otcIds = [],
   onRefresh,
 }: {
   instId: string;
+  /** the desk admin's cap — enables the on-chain floor-policy control */
+  adminCapId?: string;
   state: InstState | null;
   /** the desk's OPEN, unexpired contracts — armed into crash ticks so the
    *  breach crank fires while liquidity is out (margin call → cure → survive) */
   otcIds?: string[];
   onRefresh: () => void;
 }) {
+  const account = useCurrentAccount();
   const rehypothecate = useRehypothecate();
   const recall = useRecall();
   const rates = useRates();
+  const sponsoredExecute = useSponsoredExecute();
 
   // ---- live on-chain reads ----
   const [supplied, setSupplied] = useState(0);
@@ -62,14 +70,22 @@ export default function RehypoHero({
   // ---- ux ----
   const [busy, setBusy] = useState<string | null>(null);
   const [flow, setFlow] = useState<Flow>(0);
+  const [screenFlash, setScreenFlash] = useState<"crash" | "calm" | null>(null); // full-viewport mood wash
+  const calmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flashCrash = useCallback(() => {
+    if (calmTimer.current) clearTimeout(calmTimer.current);
+    setScreenFlash("crash");
+  }, []);
+  const flashCalm = useCallback(() => {
+    if (calmTimer.current) clearTimeout(calmTimer.current);
+    setScreenFlash("calm");
+    calmTimer.current = setTimeout(() => setScreenFlash(null), 1900);
+  }, []);
   const [bannerMsg, setBannerMsg] = useState<{ tone: "red" | "green"; text: string } | null>(null);
   const [lastDigest, setLastDigest] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [amounts, setAmounts] = useState<Record<string, number | "">>({});
   const [spikePrice, setSpikePrice] = useState<number>(SPCX.spikeMark);
-  const [rebFrom, setRebFrom] = useState<VenueKey>("deepbook");
-  const [rebTo, setRebTo] = useState<VenueKey>("suilend");
-  const [rebAmt, setRebAmt] = useState<number | "">("");
 
   const aprs = {
     deepbook: rates?.rates.deepbook ?? 4.0,
@@ -89,10 +105,11 @@ export default function RehypoHero({
   // liquid, and withdrawn interest lands back in liquid — every dollar of
   // uiLiquid + deployed reconciles to on-chain equity + unrealised interest.
   const uiLiquid = Math.max(0, liquid - sims.cashOut);
-  // On-chain floor (25% of reserved IM by default); client-side fallback if the
-  // read hasn't landed, so the deploy buttons are never dead while loading.
-  const floor = floorInfo?.floor ?? reserved * 0.25;
-  const chainDeployable = floorInfo?.deployable ?? Math.max(0, liquid - reserved * 0.25);
+  // On-chain liquidity floor — $0 by default now (all locked IM is deployable),
+  // so the client-side fallback (used only until the on-chain read lands) is $0
+  // too. A desk's real on-chain value still wins whenever it has customised one.
+  const floor = floorInfo?.floor ?? 0;
+  const chainDeployable = floorInfo?.deployable ?? Math.max(0, liquid);
   // POLICY: only the LOCKED margin is rehypothecated. Free liquidity — the
   // VM/PnL buffer the institution reloads daily — never leaves the treasury
   // (routing all liquidity before the risk controls mature is a hack magnet).
@@ -115,10 +132,12 @@ export default function RehypoHero({
     if (imIdle <= 0)
       return overDeployed > 0.005
         ? `all locked IM is out — incl. ${usd(overDeployed)} above policy (older deploys); Recall brings it home`
-        : "all locked IM is deployed — ⇄ Rebalance moves it between venues";
+        : "all locked IM is deployed";
     const m = venue === "deepbook" ? deepbookMax : simMax;
-    if (m <= 0) return `blocked by the on-chain floor: ${usd(floor)} must stay liquid, treasury holds ${usd(uiLiquid)} — recall or load funds`;
-    if (m < imIdle - 0.005) return `up to ${usd(m)} now — the floor keeps ${usd(floor)} liquid (of ${usd(imIdle)} undeployed IM)`;
+    if (m <= 0)
+      return `nothing liquid to deploy right now — recall a venue or load funds`;
+    if (m < imIdle - 0.005)
+      return `up to ${usd(m)} now — only that much of the ${usd(imIdle)} locked IM is currently liquid`;
     return `up to ${usd(m)} — locked IM not yet deployed`;
   }
 
@@ -181,6 +200,7 @@ export default function RehypoHero({
         recalledRef.suilend = suilendPre;
         recalledRef.navi = naviPre;
         const total = recalledRef.deepbook + suilendPre + naviPre;
+        flashCrash(); // collateral is pulling home NOW → red wash starts here
         setFlow(-1);
         if (r.recallDigest) setLastDigest(r.recallDigest);
         setChartEvents((es) => [...es, { tick: tickIndex, kind: "recall", amount: total }]);
@@ -191,6 +211,7 @@ export default function RehypoHero({
 
       const released = wasTriggered && !r.triggered;
       if (released) {
+        flashCalm(); // market calmed on its own → green wash → normal
         setFlow(1);
         // Redeposit is capped by what is deployable NOW, not by what was
         // recalled: VM paid during the crash shrinks the treasury (redepositing
@@ -236,7 +257,7 @@ export default function RehypoHero({
       }
       return released;
     },
-    [instId, aprs.suilend, aprs.navi, rehypothecate, onRefresh],
+    [instId, aprs.suilend, aprs.navi, rehypothecate, onRefresh, flashCrash, flashCalm],
   );
 
   /** Cure-step side effects: recall event + "positions survive" banner. */
@@ -252,6 +273,7 @@ export default function RehypoHero({
       recalledRef.suilend = suilendPre;
       recalledRef.navi = naviPre;
       const total = recalledRef.deepbook + suilendPre + naviPre;
+      flashCrash(); // collateral recalling home during the cure → red wash
       setFlow(-1);
       if (cu.recallDigest) setLastDigest(cu.recallDigest);
       setChartEvents((es) => [...es, { tick: tickIndex, kind: "recall", amount: total }]);
@@ -292,6 +314,9 @@ export default function RehypoHero({
           // tick cranks them (margin calls) instead of silently auto-recalling
           const arm = phaseRef.current === "idle" && otcIds.length ? otcIds : undefined;
           const r = await pushTick(instId, price, arm);
+          // Draw the print only AFTER the tx confirms, so the price point lands
+          // in the SAME frame as the recall/redeposit markers + treasury moves —
+          // keeping the chart in lockstep with the on-chain collateral movements.
           const released = await applyTickResult(r, wasTriggered, recalledRef);
           wasTriggered = r.triggered;
           if (released) phaseRef.current = "idle"; // cycle complete — next crash can call again
@@ -309,13 +334,35 @@ export default function RehypoHero({
               // a failed cure (e.g. the desk genuinely cannot cover) is a demo
               // STATE, not a reason to kill the market loop
               try {
-                const cu = await cureCalls(instId, otcIds);
+                let cu = await cureCalls(instId, otcIds);
                 await applyCure(cu, recalledRef);
                 wasTriggered = cu.triggered;
-                if (!(cu.cured ?? []).some((x) => x.status === 0 && x.deadline == null)) {
+                let uncured = (cu.cured ?? []).filter((x) => x.status === 0 && x.deadline != null).length > 0
+                  || (cu.cured ?? []).length === 0;
+                if (uncured && adminCapId && account) {
+                  // recall alone moves funds home — it can't ADD capital. The
+                  // margin call is a CAPITAL CALL: wire the daily reload.
                   setBannerMsg({
                     tone: "red",
-                    text: "⚠ CURE INSUFFICIENT — the desk cannot cover the call even after recall · deposit funds or it liquidates when the countdown lapses",
+                    text: `⚠ CAPITAL CALL — recall alone can't cover the VM · wiring the daily treasury reload (+${usd(RELOAD_USD)}, mock on-ramp)…`,
+                  });
+                  await reloadTreasury(RELOAD_USD);
+                  cu = await cureCalls(instId, otcIds);
+                  await applyCure(cu, recalledRef);
+                  wasTriggered = cu.triggered;
+                  uncured = (cu.cured ?? []).filter((x) => x.status === 0 && x.deadline != null).length > 0
+                    || (cu.cured ?? []).length === 0;
+                  if (!uncured) {
+                    setBannerMsg({
+                      tone: "green",
+                      text: `✓ CURED — recall brought the IM home + the ${usd(RELOAD_USD)} reload covered the VM · positions pay & survive`,
+                    });
+                  }
+                }
+                if (uncured) {
+                  setBannerMsg({
+                    tone: "red",
+                    text: "⚠ CURE INSUFFICIENT — even after the recall + reload the desk cannot cover · it liquidates when the countdown lapses",
                   });
                 }
               } catch (e) {
@@ -355,13 +402,18 @@ export default function RehypoHero({
   function inject(kind: MarketEventKind) {
     marketRef.current?.inject(kind);
     wakeRef.current?.(); // fire the next print now, don't wait out the cadence
-    if (kind !== "calm") {
+    if (kind === "calm") {
+      flashCalm(); // green wash → back to normal
+      return;
+    }
+    // NOTE: the red screen wash is NOT fired here (while the crash is "brewing")
+    // — it starts at the actual recall moment (see applyTickResult/applyCure),
+    // so the screen goes red exactly as the collateral pulls home.
+    {
       const text =
         kind === "crash"
-          ? "💥 CRASH BREWING — tremors first: watch the trigger pull collateral home BEFORE the main gap"
-          : kind === "gap"
-            ? "⚡ FLASH GAP — no warning: the breach cranks while funds are deployed (margin-call drill)"
-            : "▲ SQUEEZE INCOMING — next print gaps +18…23%";
+          ? "💥 CRASH BREWING — tremors first: watch the trigger pull collateral home BEFORE the main leg"
+          : "▲ SQUEEZE BREWING — tremors first: the trigger pulls collateral home BEFORE the main leg up";
       setBannerMsg({ tone: "red", text });
       setTimeout(() => setBannerMsg(null), 2600);
     }
@@ -384,6 +436,8 @@ export default function RehypoHero({
       setPoints([]);
       setChartEvents([]);
       setBannerMsg(null);
+      if (calmTimer.current) clearTimeout(calmTimer.current);
+      setScreenFlash(null); // clean stage — clear any mood wash
       phaseRef.current = "idle";
       if (r.clearedCalls?.length) {
         setBannerMsg({ tone: "green", text: `✓ STAGE RESET · ${r.clearedCalls.length} stale margin call${r.clearedCalls.length > 1 ? "s" : ""} defused (fresh cure window on the next breach)` });
@@ -419,6 +473,31 @@ export default function RehypoHero({
     } finally {
       setBusy(null);
     }
+  }
+
+  /* The CAPITAL-CALL cure leg: a margin call means available capital (equity −
+     locked IM) can't cover the VM — and a recall can never fix that (it moves
+     funds home, it doesn't add any; a desk's own locked IM can't pay its own
+     VM). The cure that works is the institution's daily treasury reload —
+     here the mock on-ramp mints it and the desk deposits, gasless. */
+  const RELOAD_USD = 20;
+  async function reloadTreasury(amount: number) {
+    if (!account || !adminCapId) throw new Error("no admin session for the treasury reload");
+    const r = await fetch("/api/faucet", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ to: account.address, amount }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.coinId) throw new Error(d.error ?? "on-ramp failed");
+    const digest = await sponsoredExecute((tx) => {
+      tx.moveCall({
+        target: TARGET.institution.deposit,
+        typeArguments: [DBUSDC_TYPE],
+        arguments: [tx.object(instId), tx.object(adminCapId), tx.object(d.coinId)],
+      });
+    });
+    await suiRead.waitForTransaction({ digest });
   }
 
   // ---- per-venue deploy / recall (DeepBook real; Suilend/Navi sim) ----
@@ -485,36 +564,20 @@ export default function RehypoHero({
   /** Move collateral venue → venue without touching the treasury total:
    *  recall/withdraw out of the source, deploy into the target. DeepBook legs
    *  are real testnet txs; SIM legs settle instantly in the ledger. */
-  async function doRebalance() {
-    if (rebFrom === rebTo) return setError("Pick two different venues to rebalance.");
-    const inFrom = rebFrom === "deepbook" ? rehyp : rebFrom === "suilend" ? suilendVal : naviVal;
-    const amt = Math.floor(Math.min(Number(rebAmt) || inFrom, inFrom) * 100) / 100;
-    if (amt <= 0) return setError(`Nothing to move — ${rebFrom} holds ${usd(inFrom)}.`);
-    setError(null);
-    setBusy("rebalance");
-    setFlow(1);
-    try {
-      if (rebFrom === "deepbook") setLastDigest(await recall(amt));
-      else setSims(simWithdraw(instId, rebFrom, amt, aprs[rebFrom]).all);
-      if (rebTo === "deepbook") setLastDigest(await rehypothecate(amt));
-      else setSims(simDeposit(instId, rebTo, amt, aprs[rebTo]));
-      setRebAmt("");
-      onRefresh();
-      await poll();
-    } catch (e) {
-      // a failed second leg leaves the moved amount in liquid — visible, not lost
-      setError(friendlyMoveError(e instanceof Error ? e.message : String(e)));
-    } finally {
-      setBusy(null);
-      setTimeout(() => setFlow(0), 600);
-    }
-  }
-
   const windowPoints = points.slice(-WINDOW);
   const startTick = points.length - windowPoints.length;
 
   return (
-    <section className="relative mt-6 overflow-hidden rounded-[16px] border border-line-strong bg-surface">
+    <>
+      {/* dramatic full-viewport mood wash: pulsing red while a crash unfolds,
+          a green fade when the market calms (click-through) */}
+      {screenFlash && (
+        <div
+          className={`pointer-events-none fixed inset-0 z-40 ${screenFlash === "crash" ? "fm-crash-wash" : "fm-calm-wash"}`}
+          aria-hidden
+        />
+      )}
+      <section className="relative mt-6 overflow-hidden rounded-[16px] border border-line-strong bg-surface">
       {bannerMsg && (
         <div
           className="fm-banner-in absolute inset-x-0 top-0 z-10 flex items-center justify-center gap-3 py-2.5 text-[13px] font-semibold tracking-[0.06em] text-bg"
@@ -577,17 +640,9 @@ export default function RehypoHero({
               💥 Crash
             </button>
             <button
-              onClick={() => inject("gap")}
-              disabled={!running}
-              title="No-warning flash gap (−19…21% in one print): the breach cranks while funds are deployed — the margin-call drill"
-              className="rounded-[7px] border px-3.5 py-2 text-[13px] font-semibold transition-colors disabled:opacity-30"
-              style={{ borderColor: STATUS.red, color: STATUS.red, opacity: 0.85 }}
-            >
-              ⚡ Gap
-            </button>
-            <button
               onClick={() => inject("spike")}
               disabled={!running}
+              title="Gradual squeeze UP: +3…5% tremors latch the trigger and recall collateral BEFORE the +12…13% main leg (cumulative +19…21%)"
               className="rounded-[7px] border border-line-strong px-3.5 py-2 text-[13px] font-semibold text-ink transition-colors hover:bg-bg disabled:opacity-30"
             >
               ▲ Spike
@@ -608,17 +663,12 @@ export default function RehypoHero({
               {busy === "reset" ? "…" : "Reset"}
             </button>
             {otcIds.length > 0 && (
-              <label className="ml-1 flex cursor-pointer items-center gap-1.5 text-[11px] text-muted" title="On a margin call, run the permissionless recall + re-crank so positions pay and survive. Untick to let the cure window run out (liquidation drill).">
+              <label className="ml-1 flex cursor-pointer items-center gap-1.5 text-[11px] text-muted" title="On a margin call: permissionless recall + the daily treasury reload (+$20 mock on-ramp) + re-crank — positions pay and survive. Untick to let the cure window run out (liquidation drill).">
                 <input type="checkbox" checked={autoCure} onChange={(e) => setAutoCure(e.target.checked)} className="accent-[#0f0f0f]" />
                 auto-cure margin calls
               </label>
             )}
           </div>
-          <p className="max-w-[350px] text-right text-[11px] leading-[1.5] text-muted">
-            A live feed — every print is a real on-chain push. 💥 Crash arrives like real ones: tremors latch the σ trigger and the
-            permissionless recall pulls collateral home <em>before</em> the main gap. ⚡ Gap is the no-warning version — funds still
-            deployed → margin call → cure. When the market calms, the {SPCX_VOL.releaseNeeded}-print hysteresis releases and margin redeposits.
-          </p>
         </div>
         {windowPoints.length > 0 ? (
           <ScenarioChart points={windowPoints} events={chartEvents} startTick={startTick} minSlots={Math.min(WINDOW, Math.max(24, windowPoints.length))} />
@@ -687,29 +737,6 @@ export default function RehypoHero({
         <VenueCard venue="navi" name="Navi" logo="/logos/navi.png" badge="sim · live mainnet APR" value={naviVal} share={totalDeployed > 0 ? naviVal / totalDeployed : 0} apr={aprs.navi} max={simMax} reason={capReason("navi")} accrued={simAccrued(sims.navi, aprs.navi)} amounts={amounts} setAmounts={setAmounts} busy={busy} onDeploy={() => venueDeploy("navi")} onRecall={() => venueRecall("navi")} />
       </div>
 
-      {/* rebalance: shift collateral between venues; treasury total unchanged */}
-      <div className="flex flex-wrap items-center gap-2 px-6 pb-5">
-        <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.13em] text-muted">⇄ Rebalance</span>
-        <VenueSelect value={rebFrom} onChange={setRebFrom} />
-        <span className="text-[13px] text-muted">→</span>
-        <VenueSelect value={rebTo} onChange={setRebTo} />
-        <input
-          type="number"
-          placeholder="amount · blank = all"
-          value={rebAmt}
-          onChange={(e) => setRebAmt(e.target.value === "" ? "" : +e.target.value)}
-          className="w-[150px] rounded-[6px] border border-line bg-bg px-2 py-1.5 font-mono text-[12px] text-ink outline-none focus:border-line-strong"
-        />
-        <button
-          onClick={doRebalance}
-          disabled={!!busy || rebFrom === rebTo}
-          className="rounded-[6px] border border-line-strong bg-ink px-3 py-1.5 text-[11.5px] font-semibold text-bg hover:opacity-90 disabled:opacity-40"
-        >
-          {busy === "rebalance" ? "…" : "Move"}
-        </button>
-        <span className="font-mono text-[10.5px] text-faint">DeepBook legs are real txs · SIM legs settle instantly</span>
-      </div>
-
       {/* provenance */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line px-6 py-3 font-mono text-[11px] text-muted">
         <span style={{ color: STATUS.green }}>● DeepBook leg real on testnet</span>
@@ -751,7 +778,8 @@ export default function RehypoHero({
       </div>
 
       {error && <p className="break-words px-6 pb-4 text-[12px]" style={{ color: STATUS.red }}>{error}</p>}
-    </section>
+      </section>
+    </>
   );
 }
 
@@ -998,34 +1026,28 @@ function Vessel({
 
 function Conduit({ flow }: { flow: Flow }) {
   const cls = flow === 1 ? "fm-flow-right" : flow === -1 ? "fm-flow-left" : "";
-  const color = flow === -1 ? STATUS.red : "#2456c4";
-  const caption = flow === 1 ? "DEPLOYING →" : flow === -1 ? "◄ RECALL" : "IDLE";
+  const color = flow === -1 ? FLOW.recall : flow === 1 ? FLOW.deploy : "var(--color-line-strong)";
+  const caption = flow === 1 ? "DEPLOYING →" : flow === -1 ? "◄ RECALLING" : "IDLE";
   return (
-    <div className="flex w-[120px] flex-col items-center justify-center px-2">
-      <svg width="120" height="40" viewBox="0 0 120 40" aria-hidden>
-        <line x1="4" y1="20" x2="116" y2="20" stroke="var(--color-line-strong)" strokeWidth="1" />
+    <div className="flex w-[120px] flex-col items-center justify-center gap-1 px-2">
+      <svg width="120" height="34" viewBox="0 0 120 34" aria-hidden>
+        <line x1="4" y1="17" x2="116" y2="17" stroke="var(--color-line-strong)" strokeWidth="1.5" opacity="0.6" />
         {flow !== 0 && (
-          <line x1="4" y1="20" x2="116" y2="20" stroke={color} strokeWidth="2.5" strokeDasharray="6 10" className={cls} />
+          <line
+            x1="4" y1="17" x2="116" y2="17"
+            stroke={color} strokeWidth="4.5" strokeDasharray="9 8" strokeLinecap="round"
+            className={cls}
+            style={{ filter: `drop-shadow(0 0 5px ${color})` }}
+          />
         )}
       </svg>
-      <span className="font-mono text-[10px] tracking-[0.12em]" style={{ color: flow === -1 ? STATUS.red : "var(--color-muted)" }}>
+      <span
+        className="font-mono text-[11px] font-bold tracking-[0.1em]"
+        style={{ color: flow === 0 ? "var(--color-muted)" : color, textShadow: flow !== 0 ? `0 0 8px ${color}66` : "none" }}
+      >
         {caption}
       </span>
     </div>
-  );
-}
-
-function VenueSelect({ value, onChange }: { value: VenueKey; onChange: (v: VenueKey) => void }) {
-  return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value as VenueKey)}
-      className="rounded-[6px] border border-line bg-bg px-2 py-1.5 font-mono text-[12px] text-ink outline-none focus:border-line-strong"
-    >
-      <option value="deepbook">DeepBook</option>
-      <option value="suilend">Suilend</option>
-      <option value="navi">Navi</option>
-    </select>
   );
 }
 

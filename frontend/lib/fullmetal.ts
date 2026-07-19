@@ -7,7 +7,7 @@
 /** Current deployed package (upgrade w/ EWMA vol oracle, rehypo router,
  *  settle_on_breach crank, two-way RFQ; demo cure window 90s). */
 export const PACKAGE =
-  "0xf8b57f09dfe5e59fcc176110c8f15cf96b27f6f23be8a4db959529d896635a4a";
+  "0x141f7de4ea75cde406d424a0669e17e34352ef9fd594bcae6f0139ef6dd74700";
 
 /** Original package id — stable across upgrades; witness type-names key on it. */
 export const ORIGINAL_PACKAGE =
@@ -41,6 +41,11 @@ export const CLOCK = "0x6";
  *  mock on-ramp stays stocked ("Reset desk" sends withdrawals to it). */
 export const OPS_ADDRESS =
   "0x6849af55b4f2f429cb2665ec9f4d42c17eecc76211f14caf959903ad786d5576";
+
+/** Dedicated localhost faucet wallet — the mock on-ramp mints from here, and
+ *  the "return to faucet" control sends the desk's free DBUSDC back to it. */
+export const FAUCET_ADDRESS =
+  "0x0d879d8906caba0f84f03c285bd52ee6c317b726a89962adcf96719963167178";
 
 export const DECIMALS = 6;
 export const UNIT = 1_000_000; // 1e6
@@ -113,6 +118,7 @@ export const TARGET = {
     settleOnBreach: `${PACKAGE}::otc_forward::settle_on_breach`,
     mmBreached: `${PACKAGE}::otc_forward::mm_breached`,
     marginCallDeadline: `${PACKAGE}::otc_forward::margin_call_deadline`,
+    marginCallShortOwes: `${PACKAGE}::otc_forward::margin_call_short_owes`,
   },
   rehypo: {
     rehypothecate: `${PACKAGE}::rehypo::rehypothecate`,

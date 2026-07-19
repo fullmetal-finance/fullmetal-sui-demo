@@ -6,6 +6,7 @@ import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { Transaction } from "@mysten/sui/transactions";
 
 import { serverSuiClient } from "@/lib/server-sui";
+import { opsTx } from "@/lib/keeper-queue";
 
 export const runtime = "nodejs";
 
@@ -61,11 +62,11 @@ export async function POST(request: Request) {
     const [coin] = tx.splitCoins(tx.gas, [TOPUP]);
     tx.transferObjects([coin], address);
 
-    const res = await client.signAndExecuteTransaction({
+    const res = await opsTx(() => client.signAndExecuteTransaction({
       signer: opsKeypair(),
       transaction: tx,
       options: { showEffects: true },
-    });
+    }));
     await client.waitForTransaction({ digest: res.digest });
     if (res.effects?.status.status !== "success") {
       lastTopup.delete(address); // failed send shouldn't burn the cooldown

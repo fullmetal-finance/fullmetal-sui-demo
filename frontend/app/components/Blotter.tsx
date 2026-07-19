@@ -6,7 +6,7 @@ import { explorer, usd } from "@/lib/fullmetal";
 import { MOCK_POSITIONS, positionPnl, type MockPosition } from "@/lib/mock";
 import ManageModal from "./ManageModal";
 
-export default function Blotter({ real = [] }: { real?: MockPosition[] }) {
+export default function Blotter({ real = [], onRefresh }: { real?: MockPosition[]; onRefresh?: () => void }) {
   const rows = [...real, ...MOCK_POSITIONS];
   const [selected, setSelected] = useState<MockPosition | null>(null);
   return (
@@ -25,8 +25,8 @@ export default function Blotter({ real = [] }: { real?: MockPosition[] }) {
                 <Th>Trader</Th>
                 <Th>Counterparty</Th>
                 <Th right>Notional</Th>
-                <Th right>Entry</Th>
-                <Th right>Mark</Th>
+                <Th right title="the forward price you agreed at (entry)">Entry</Th>
+                <Th right title="the current market price (mark-to-market)">Mark</Th>
                 <Th right>uPnL</Th>
                 <Th right>IM</Th>
                 <Th>Venue</Th>
@@ -45,6 +45,7 @@ export default function Blotter({ real = [] }: { real?: MockPosition[] }) {
       <ManageModal
         subject={selected ? { kind: "position", position: selected } : null}
         onClose={() => setSelected(null)}
+        onRefresh={onRefresh}
       />
     </>
   );
@@ -100,8 +101,8 @@ function Row({ p, onSelect }: { p: MockPosition; onSelect: () => void }) {
   );
 }
 
-function Th({ children, right }: { children: React.ReactNode; right?: boolean }) {
-  return <th className={`px-4 py-2.5 font-medium ${right ? "text-right" : ""}`}>{children}</th>;
+function Th({ children, right, title }: { children: React.ReactNode; right?: boolean; title?: string }) {
+  return <th title={title} className={`px-4 py-2.5 font-medium ${right ? "text-right" : ""}`}>{children}</th>;
 }
 function Td({ children, right, mono }: { children: React.ReactNode; right?: boolean; mono?: boolean }) {
   return <td className={`px-4 py-3 ${right ? "text-right" : ""} ${mono ? "font-mono" : ""}`}>{children}</td>;

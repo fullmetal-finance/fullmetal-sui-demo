@@ -126,7 +126,7 @@ move, it couldn't prove where it was. We make collateral provable, so it can mov
 | Claim | Mechanism (say it in one breath) | Where |
 |---|---|---|
 | One pooled, cross-margined treasury per desk | IM is an **accounting fence** (`reserved`), never a transfer — one pool backs every position simultaneously | `institution.move` |
-| Idle margin earns | Surplus above the on-chain liquidity floor is supplied to DeepBook margin / Suilend / Navi; **the institution object itself custodies the receipts** | `rehypo.move`, `rehypo_router.move` |
+| Idle margin earns | The **locked IM** is supplied to DeepBook margin / Suilend / Navi; **the institution object itself custodies the receipts**. Current posture: ONLY reserved margin deploys — free liquidity (the VM/PnL buffer) never leaves the treasury until the full §6-style risk controls mature | `rehypo.move`, `rehypo_router.move` |
 | Risk response is permissionless | EWMA volatility trigger latches on-chain; **anyone** can crank the recall — no operator, no 3am admin key | `oracle.move`, `recall_on_trigger` |
 | 2008 is excluded by construction | Receipts are never re-pledged — **collateral velocity capped at 1 by the type system**, not a covenant | receipts held as dynamic fields; no re-pledge path exists |
 
@@ -224,7 +224,7 @@ value moves only through hot-potato tickets that cannot be dropped.
   outages in demo week, both survived with code, is the honest resilience story.
 
 ### 3.4 Verification story (memorize the numbers)
-- **40/40 Move unit tests** — lifecycle, RFQ/direct/two-way economics, cross-margin
+- **43/43 Move unit tests** — lifecycle, RFQ/direct/two-way economics, cross-margin
   crank (grace, margin-call-then-liquidate, funding telescoping), risk layer
   (hand-computed EWMA variance traces, hysteresis, floor boundary, ticket round-trips).
 - **Live testnet smokes** (scripts, re-runnable): the full EWMA loop — latch at the
@@ -586,13 +586,20 @@ is the differentiator to flaunt: every parameter traces to a primary source.
 - EWMA (SPCX demo feed): seed σ 150 bps/print, **λ = 0.60** (demo cadence; prod ≈ 0.94),
   shock latch z* = 4σ, regime ceiling 800 bps/print, release band < 560 bps (0.7 × ceil)
   × **3 consecutive prints**. Legacy jump trigger (±15%) still active beneath.
-- Live market ticker: continuous real on-chain prints (~1.5 s cadence); **💥 Crash**
-  injects a −18…22% gap (latches at z ≫ 4σ), aftermath vol decays with a ~3-print
-  half-life, release lands **~6–7 prints after the crash** (~15–20 s crash→redeposit);
+- Live market ticker: continuous real on-chain prints (~1.5 s cadence). **💥 Crash**
+  is PRE-EMPTED, the way real crashes cluster: −3…4% tremor (z ≫ 4σ → latch →
+  **recall fires before the main gap**) → −4…5% escalation → −12…13% main gap
+  (cumulative −19…21%) — the desk pays VM from recalled liquidity, no margin call.
+  **⚡ Gap** is the no-warning single −19…21% print: funds still deployed → margin
+  call → cure → survive (due process). Aftermath vol decays with a ~3-print
+  half-life; release lands ~6–7 prints post-gap (~20–25 s crash→redeposit);
   Monte-Carlo checked: false-latch ≈ 0.003%/print, crash always latches.
-- Drill math: $100 desk, 1-SPCX contracts (IM $9.25 each), deploy ≥ $65 so liquid < $37
-  (= the VM a −20% move owes) ⇒ margin call fires instead of instant pay.
-- Tests: **40/40 Move**; live smokes passed 2026-07-10 (`vol-smoke.ts`,
+- Drill math (IM-only deploys, SPCX @ ~$148 — the REAL Nasdaq price since the June
+  2026 IPO): **$42 desk**, 1 SPCX contract (IM $8 default, auto-deploys on open) →
+  available $26 (equity − locked IM) < the $28–31 crash VM ⇒ margin call fires; cure recalls the IM → available $34
+  covers ⇒ survives. Below ~$39 the call is uncurable; at ~$44+ the desk pays
+  instantly and no call fires.
+- Tests: **43/43 Move**; live smokes passed 2026-07-17 (post-upgrade) (`vol-smoke.ts`,
   `drill-smoke.ts`).
 - Current testnet package: `0xf8b57f09…635a4a` (additive upgrade over the original
   `0x3dfbfa52…`, published live during demo prep).

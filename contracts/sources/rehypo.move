@@ -57,6 +57,12 @@ public fun rehypothecate<C>(
         institution::total(inst) - amount >= rehypo_router::required_floor(inst),
         errors::e_below_liquidity_floor(),
     );
+    // IM-ONLY POLICY (on-chain since this upgrade): deploys may never exceed
+    // the locked IM — free liquidity (the VM/PnL buffer) stays in the treasury.
+    assert!(
+        institution::rehypothecated_of(inst) + amount <= institution::reserved_of(inst),
+        errors::e_over_locked_im(),
+    );
     ensure_cap(inst, registry, clock, ctx);
 
     let coin = coin::take(institution::treasury_mut(inst), amount, ctx);

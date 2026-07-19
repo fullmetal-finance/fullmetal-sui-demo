@@ -21,7 +21,7 @@ import { Transaction, coinWithBalance } from '@mysten/sui/transactions';
 
 import { TESTNET_JSONRPC_URL } from './rpc';
 
-const PKG = '0xf8b57f09dfe5e59fcc176110c8f15cf96b27f6f23be8a4db959529d896635a4a';
+const PKG = '0x141f7de4ea75cde406d424a0669e17e34352ef9fd594bcae6f0139ef6dd74700';
 const REG = '0x1b18463c8e784b709f326787520e313f62eb75485ac2163673720d77eefddcc8';
 const ALLOW = '0x6adb6cb2a30e37a9255138a56981516f1267d2284fc06f28917034ad7413e68a';
 const ORACLE = '0xac39229ae9e9547582aa607c1bc084b42fd722aa5e74595af16875efcffb4cdd';

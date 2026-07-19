@@ -530,7 +530,7 @@ does not), so the version is pinned. OZ math stays a git dep (it ships
 
 | Object | ID |
 |---|---|
-| Package (current) | `0xf8b57f09dfe5e59fcc176110c8f15cf96b27f6f23be8a4db959529d896635a4a` (upgrade: EWMA vol oracle, rehypo router, `settle_on_breach`, two-way RFQ; demo 90s cure window) |
+| Package (current) | `0x141f7de4ea75cde406d424a0669e17e34352ef9fd594bcae6f0139ef6dd74700` (upgrade: EWMA vol oracle, rehypo router, `settle_on_breach`, two-way RFQ; demo 90s cure window) |
 | Package (prev — recall-rounding fix) | `0x53ed96a991241db1e20c964930f1e9981c2db438f74dc17867f9705bd8b392b0` |
 | Package (prev — direct offer) | `0xbbf751ec720828c7ca39efefcd246c43c86e46ae310218a420c00aaf27b5b7fa` |
 | Package (prev — RFQ) | `0x7106aeb00de8f07c4f5c28e1fc7b13b03e42e474e6221db81e81b09ca80b561e` |

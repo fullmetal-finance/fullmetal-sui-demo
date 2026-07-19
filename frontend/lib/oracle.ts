@@ -78,9 +78,11 @@ export function friendlyMoveError(msg: string): string {
   if (msg.includes("abort code: 73")) return "position is healthy — nothing to crank";
   if (msg.includes("abort code: 78")) return "contract is past expiry — settle it via close";
   if (msg.includes("abort code: 63")) return "risk trigger is no longer active";
+  if (msg.includes("abort code: 25")) return "deploy exceeds the locked IM — only locked margin is rehypothecated (free liquidity stays in the treasury)";
   if (msg.includes("abort code: 24")) return "deploy would breach the on-chain liquidity floor";
   if (msg.includes("abort code: 23")) return "not enough liquid treasury — funds are deployed at a venue; recall first";
   if (msg.includes("abort code: 22")) return "insufficient free treasury for this amount (reserved IM cannot be spent)";
+  if (msg.includes("rejected as invalid by more than 1/3")) return "keeper transactions overlapped — retrying next tick (they are serialized now; this should not recur)";
   if (msg.includes("abort code: 90")) return "this RFQ is already filled or closed — the winning quote opened a contract; the other quotes are void";
   if (msg.includes("abort code: 91")) return "the RFQ has expired — broadcast a new one";
   if (msg.includes("abort code: 93")) return "that quote is no longer live (withdrawn, already accepted, or reclaimed)";

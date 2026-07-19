@@ -91,16 +91,9 @@ export default function MarginPanel({
 
   return (
     <section className="rounded-[14px] border border-line-strong bg-surface">
-      {/* what cross-margin MEANS, in one breath */}
       <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 border-b border-line-strong px-6 py-4">
-        <div className="max-w-[560px]">
+        <div>
           <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-ink">Cross-margin — one pool backs every trade</h2>
-          <p className="mt-1 text-[12px] leading-[1.6] text-muted">
-            Positions here have <b>no separate collateral accounts</b>. Each trade&apos;s initial margin is a colored{" "}
-            <b>hold inside the one treasury bar</b> below (locked, never moved), and every mark-to-market cashflow
-            settles against the <b>same shared buffer</b> — a winner&apos;s gains automatically back a loser&apos;s
-            losses before any new capital is needed.
-          </p>
         </div>
         <div className="flex flex-wrap items-center gap-x-6 gap-y-2 font-mono text-[12px]">
           <Stat label="Pool equity" value={usd(equity)} />
@@ -139,10 +132,10 @@ export default function MarginPanel({
                 </div>
               );
             })}
-            <div className="flex h-full flex-1 items-center justify-center" title={`Shared VM buffer ${usd(free)} — every position settles against this same capital`}>
+            <div className="flex h-full flex-1 items-center justify-center" title={`Shared VM buffer ${usd(free)} — every position's variation margin settles from this same capital; it stays liquid in the treasury (only the locked IM is rehypothecated)`}>
               {pct(free) > 14 && (
                 <span className="font-mono text-[10px] font-semibold" style={{ color: "#1a6042" }}>
-                  shared buffer {usd(free, { maximumFractionDigits: 0 })} · backs ALL positions · earning-eligible
+                  shared buffer {usd(free, { maximumFractionDigits: 0 })} · pays every position&apos;s VM · stays liquid
                 </span>
               )}
             </div>
@@ -257,7 +250,7 @@ export default function MarginPanel({
                   VM {vm >= 0 ? "+" : "−"}{usd(Math.abs(vm))}
                 </span>
               )}
-              <HealthChip status={status} expired={expired} health={h} now={now} />
+              <HealthChip status={status} expired={expired} health={h} now={now} side={p.side} cpty={p.cpty} />
               {crankableNow ? (
                 <button
                   onClick={() => p.otcId && doCrank(p.otcId)}
@@ -307,16 +300,34 @@ function CoverageChip({ coverage }: { coverage: number | null }) {
   );
 }
 
-function HealthChip({ status, expired, health, now }: { status: number; expired: boolean; health?: ContractHealth; now: number }) {
+function HealthChip({
+  status,
+  expired,
+  health,
+  now,
+  side,
+  cpty,
+}: {
+  status: number;
+  expired: boolean;
+  health?: ContractHealth;
+  now: number;
+  side: "long" | "short";
+  cpty: string;
+}) {
   if (status === 1) return <Chip bg="rgba(0,0,0,0.07)" fg="var(--color-muted)">SETTLED</Chip>;
   if (status === 2) return <Chip bg="rgba(180,52,31,0.14)" fg={STATUS.red}>LIQUIDATED</Chip>;
   if (expired) return <Chip bg="rgba(0,0,0,0.07)" fg="var(--color-muted)">EXPIRED · settle via close</Chip>;
   if (health?.callDeadlineMs != null) {
     const left = health.callDeadlineMs - now;
-    return (
-      <Chip bg="rgba(180,52,31,0.14)" fg={STATUS.red}>
-        ⚠ MARGIN CALL · {left > 0 ? `cure ${fmtMs(left)}` : "cure window over — liquidatable"}
-      </Chip>
+    // the on-chain call names its debtor: a call is due process for ONE side —
+    // a long whose mark went UP is looking at the COUNTERPARTY's call
+    const mineOwes = health.callShortOwes == null ? true : (side === "short") === health.callShortOwes;
+    const clock = left > 0 ? `cure ${fmtMs(left)}` : "cure over — liquidatable";
+    return mineOwes ? (
+      <Chip bg="rgba(180,52,31,0.14)" fg={STATUS.red}>⚠ MARGIN CALL — you owe VM · {clock}</Chip>
+    ) : (
+      <Chip bg="rgba(138,109,26,0.12)" fg="#8a6d1a">⚠ {cpty} margin-called — they owe you · {clock}</Chip>
     );
   }
   if (health?.breached) return <Chip bg="rgba(180,52,31,0.10)" fg={STATUS.red}>MM BREACHED</Chip>;

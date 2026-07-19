@@ -250,6 +250,13 @@ public fun withdraw_for_rehypo<C>(
     if (venue_cap > 0) {
         assert!(principal_of(inst, venue) + amount <= venue_cap, errors::e_over_book_size());
     };
+    // IM-ONLY POLICY (on-chain since this upgrade): only the LOCKED margin is
+    // rehypothecated — free liquidity (the VM/PnL buffer) never leaves the
+    // treasury. Previously UI-enforced only.
+    assert!(
+        institution::rehypothecated_of(inst) + amount <= institution::reserved_of(inst),
+        errors::e_over_locked_im(),
+    );
     let inst_id = object::id(inst);
     let coin = coin::take(institution::treasury_mut(inst), amount, ctx);
     (coin, RehypoTicket { inst_id, venue, amount })

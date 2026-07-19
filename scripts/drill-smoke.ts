@@ -1,16 +1,21 @@
 /**
  * Headless rehearsal of the FULL demo drill against the running dev server
- * (localhost:3000) + live testnet — exactly the calls the UI makes:
+ * (localhost:3000) + live testnet — exactly the calls the UI makes, on the
+ * CURRENT recipe (SPCX ~$148, IM-only rehypothecation on-chain):
  *
- *   setup   scratch desk: deposit 100 DBUSDC, open a 1-SPCX direct forward vs
- *           an ops maker desk (IM 9.25 each), rehypothecate 70 → liquid 30
- *   crash   drive the flash-crash path through POST /api/oracle {action:tick}
- *           with the contract armed → the latch tick must return MARGIN CALLS
- *           (VM owed 37 > liquid 30 — funds are out earning)
- *   cure    POST {action:cure} → permissionless recall + re-crank → position
- *           PAYS and SURVIVES (deadline cleared, status still ACTIVE)
- *   release ticks continue → 3 calm prints → latch auto-releases on-chain
- *   verify  redeposit works again post-release; stage reset at the end
+ *   setup   scratch desk: deposit $42, open a 1-SPCX direct forward vs an ops
+ *           maker desk (IM $8 each — the modal default), rehypothecate the
+ *           WHOLE locked IM ($8) → available $26 (equity − locked IM)
+ *   beat 1  PRE-EMPTED CRASH: the gap tick latches; the armed crank PAYS the
+ *           ~$29 VM outright (available $34 covers) — NO margin call — and the
+ *           armed-but-payable fallback recall brings the $8 IM home
+ *   release ticks continue → 3 calm prints → latch auto-releases on-chain;
+ *           redeposit (within locked IM) works post-release
+ *   beat 2  ⚡ GAP on the now-drained desk: VM ~$22 > available ~$5 → MARGIN
+ *           CALL (due process). Cure attempt #1 (recall alone) CANNOT cover —
+ *           a desk's own locked IM never pays its own VM — then the DAILY
+ *           TREASURY RELOAD (+$20, what the app's auto-cure wires) + re-cure
+ *           → PAYS and SURVIVES. Cleanup closes the contract + sweeps.
  *
  * Usage: npx tsx drill-smoke.ts   (dev server must be running)
  */
@@ -25,7 +30,7 @@ import { Transaction, coinWithBalance } from '@mysten/sui/transactions';
 import { TESTNET_JSONRPC_URL } from './rpc';
 
 const API = process.env.API ?? 'http://localhost:3000';
-const PKG = '0xf8b57f09dfe5e59fcc176110c8f15cf96b27f6f23be8a4db959529d896635a4a';
+const PKG = '0x141f7de4ea75cde406d424a0669e17e34352ef9fd594bcae6f0139ef6dd74700';
 const ORIGINAL_PKG = '0x3dfbfa5254f00a0b501ebfdf449f044340e09f0629b37dfa7d834130157dfddf';
 const HANDLE_REGISTRY = '0x1b18463c8e784b709f326787520e313f62eb75485ac2163673720d77eefddcc8';
 const ALLOWLIST = '0x6adb6cb2a30e37a9255138a56981516f1267d2284fc06f28917034ad7413e68a';
@@ -35,7 +40,8 @@ const MARGIN_REGISTRY = '0x48d7640dfae2c6e9ceeada197a7a1643984b5a24c55a0c6c023da
 const CLOCK = '0x6';
 const CUMBERLAND = '0xf6de982cc7cae66c76c230bffc5162b412f35612caff475afe19ccfa208522df';
 
-const PATH = [184.6, 185.3, 184.9, 148.0, 152.5, 147.8, 151.2, 149.6, 150.4, 150.1, 150.6];
+// $185-era shape — scaled to the live mark at start (returns are what matter)
+const PATH_BASE = [184.6, 185.3, 184.9, 148.0, 152.5, 147.8, 151.2, 149.6, 150.4, 150.1, 150.6];
 
 function keypair(): Ed25519Keypair {
   const cfg = join(homedir(), '.sui', 'sui_config');
@@ -112,8 +118,10 @@ async function capsFor(instId: string) {
 
 async function main() {
   console.log('— drill smoke: margin call → cure → survive → release —\n');
-  await oracle({ action: 'reset' });
-  console.log('✓ stage reset ($185, σ re-seeded)');
+  const st0 = await oracle({ action: 'reset' });
+  const m0: number = st0.mark; // nominal after reset ($148)
+  const PATH = PATH_BASE.map((p) => (p / PATH_BASE[0]) * m0);
+  console.log(`✓ stage reset ($${m0}, σ re-seeded)`);
 
   // scratch desk with a trader seat
   const handle = `fmdrill${Date.now().toString(36)}`;
@@ -127,7 +135,7 @@ async function main() {
   });
   const inst = created(r1, '::institution::Institution<');
   const adminCap = created(r1, '::institution::AdminCap');
-  const r2 = await run('grant trader + deposit 100', (tx) => {
+  const r2 = await run('grant trader + deposit 42', (tx) => {
     const t = tx.moveCall({
       target: `${PKG}::institution::grant_trader`,
       typeArguments: [DBUSDC],
@@ -137,13 +145,15 @@ async function main() {
     tx.moveCall({
       target: `${PKG}::institution::deposit_treasury`,
       typeArguments: [DBUSDC],
-      arguments: [tx.object(inst), tx.object(adminCap), coinWithBalance({ type: DBUSDC, balance: 100_000_000n })],
+      arguments: [tx.object(inst), tx.object(adminCap), coinWithBalance({ type: DBUSDC, balance: 42_000_000n })],
     });
   });
   const traderCap = created(r2, '::institution::TraderCap');
-  console.log(`✓ desk ${inst.slice(0, 10)}… funded $100`);
+  console.log(`✓ desk ${inst.slice(0, 10)}… funded $42`);
 
-  // direct forward vs Cumberland: 1 SPCX @ 185, IM 9.25 (5%), daily settle, 7d
+  // direct forward vs Cumberland: 1 SPCX @ the live mark, IM $8 (modal
+  // default), daily settle, SHORT expiry so the cleanup can close it after
+  const EXPIRY_MS = Date.now() + 420_000;
   const r3 = await run('propose direct (long 1 SPCX)', (tx) => {
     tx.moveCall({
       target: `${PKG}::direct::propose_direct`,
@@ -151,9 +161,9 @@ async function main() {
       arguments: [
         tx.object(inst), tx.object(traderCap), tx.object(ALLOWLIST),
         tx.pure.id(CUMBERLAND), tx.pure.u8(0), tx.pure.string('SPCX'),
-        tx.pure.u64(1_000_000n), tx.pure.u64(185_000_000n), tx.pure.u64(9_250_000n),
+        tx.pure.u64(1_000_000n), tx.pure.u64(BigInt(Math.round(m0 * 1e6))), tx.pure.u64(8_000_000n),
         tx.pure.u64(0n), tx.pure.bool(false), tx.pure.u64(86_400_000n),
-        tx.pure.u64(BigInt(Date.now() + 7 * 86_400_000)), tx.pure.u64(3_600_000n), tx.object(CLOCK),
+        tx.pure.u64(BigInt(EXPIRY_MS)), tx.pure.u64(3_600_000n), tx.object(CLOCK),
       ],
     });
   });
@@ -172,74 +182,130 @@ async function main() {
     });
   });
   const otc = created(r4, '::otc_forward::OtcForward<');
-  console.log(`✓ OtcForward ${otc.slice(0, 10)}… open (IM $9.25 each, MM buffer $2.78)`);
+  console.log(`✓ OtcForward ${otc.slice(0, 10)}… open (IM $8 each, MM buffer $2.40)`);
 
-  // deploy 70 → liquid 30 < the $37 VM a −20% crash owes
-  await run('rehypothecate 70', (tx) => {
+  // deploy the WHOLE locked IM ($8) → available $26 < the ~$29 VM of the crash
+  await run('rehypothecate the locked $8', (tx) => {
     tx.moveCall({
       target: `${PKG}::rehypo::rehypothecate`,
       typeArguments: [DBUSDC],
-      arguments: [tx.object(inst), tx.object(adminCap), tx.object(MARGIN_POOL), tx.object(MARGIN_REGISTRY), tx.pure.u64(70_000_000n), tx.object(CLOCK)],
+      arguments: [tx.object(inst), tx.object(adminCap), tx.object(MARGIN_POOL), tx.object(MARGIN_REGISTRY), tx.pure.u64(8_000_000n), tx.object(CLOCK)],
     });
   });
   let n = await instNums(inst);
   console.log(`✓ deployed: liquid $${n.liquid} · in DeepBook $${n.rehyp}\n`);
 
-  // ---- the crash, via the app's own API ----
-  let calls: { otcId: string; deadline: number | null; status: number }[] = [];
-  let cured = false;
+  // ---- beat 1: the pre-empted crash, via the app's own API ----
+  let paidOutright = false;
+  let recalled = false;
   let releaseTick = -1;
   let wasTriggered = false;
   for (let i = 0; i < PATH.length; i++) {
     const tick = i + 1;
-    const r = await oracle({ action: 'tick', instId: inst, price: PATH[i], otcIds: cured ? undefined : [otc] });
+    const r = await oracle({ action: 'tick', instId: inst, price: PATH[i], otcIds: [otc] });
     const state = r.triggered ? 'LATCHED' : 'calm   ';
     console.log(`tick ${String(tick).padStart(2)}: $${r.mark.toFixed(2).padStart(7)} | σ ${String(r.sigmaBps).padStart(4)} | ${state} | release ${r.releaseProgress}/3`);
-    if (r.marginCalls?.length && !cured) {
-      calls = r.marginCalls;
-      const d = calls[0].deadline;
-      console.log(`        ⚠ MARGIN CALL recorded — cure deadline ${d ? new Date(d).toISOString().slice(11, 19) : '—'} (90s window)`);
-      if (calls[0].deadline == null) throw new Error('expected a margin-call deadline');
-      const cu = await oracle({ action: 'cure', instId: inst, otcIds: [otc] });
-      const c = (cu.cured ?? [])[0];
-      console.log(`        ✓ cure: recalled $${cu.recalledAmount} · post-crank deadline=${c?.deadline ?? 'CLEARED'} status=${c?.status === 0 ? 'ACTIVE (survived)' : c?.status}`);
-      if (!cu.recalled || c?.deadline != null || c?.status !== 0) throw new Error('cure did not clear the call');
-      cured = true;
+    for (const m of r.marginCalls ?? []) {
+      if (m.deadline != null) throw new Error('beat 1 must PAY outright — a margin call fired (desk sizing wrong?)');
+      paidOutright = true;
+      console.log('        ✓ armed crank PAID the VM outright — no margin call (available covers)');
+    }
+    if (r.recalled) {
+      recalled = true;
+      console.log(`        ✓ armed-but-payable fallback recall fired — $${r.recalledAmount} home`);
     }
     if (wasTriggered && !r.triggered) releaseTick = tick;
     wasTriggered = r.triggered;
   }
   n = await instNums(inst);
-  console.log(`\npost-crash: liquid $${n.liquid} · DeepBook $${n.rehyp} (VM paid from recalled liquidity)`);
+  console.log(`\npost-crash: liquid $${n.liquid} · DeepBook $${n.rehyp} (VM paid step-by-step, collateral home)`);
+  if (!paidOutright) throw new Error('no armed crank paid during the crash');
+  if (!recalled) throw new Error('fallback recall never fired');
   if (releaseTick < 0) throw new Error('latch never auto-released');
   console.log(`✓ latch auto-released on-chain at tick ${releaseTick}`);
 
-  // post-release redeposit (the UI does this as the desk's sponsored tx)
-  await run('redeposit after release', (tx) => {
+  // post-release redeposit (the UI does this as the desk's sponsored tx) —
+  // within BOTH caps: the locked IM ($8) and what the floor leaves deployable
+  // of the VM-drained liquid (~$4.7 left − $2 floor)
+  await run('redeposit after release (within locked IM + floor)', (tx) => {
     tx.moveCall({
       target: `${PKG}::rehypo::rehypothecate`,
       typeArguments: [DBUSDC],
-      arguments: [tx.object(inst), tx.object(adminCap), tx.object(MARGIN_POOL), tx.object(MARGIN_REGISTRY), tx.pure.u64(30_000_000n), tx.object(CLOCK)],
+      arguments: [tx.object(inst), tx.object(adminCap), tx.object(MARGIN_POOL), tx.object(MARGIN_REGISTRY), tx.pure.u64(2_500_000n), tx.object(CLOCK)],
     });
   });
   n = await instNums(inst);
   console.log(`✓ redeposited: liquid $${n.liquid} · DeepBook $${n.rehyp}`);
 
-  /* SECOND crash, contracts still armed — this time liquid ($33) covers the
-     VM (~$30), so the crank PAYS OUTRIGHT (no margin call). The tick handler
-     must then fall back to the plain auto-recall (the bug class the browser
-     run hit: armed-but-no-calls previously skipped the recall entirely). */
-  const p2 = 150.6 * 0.8;
+  /* ---- beat 2: ⚡ GAP on the drained desk → MARGIN CALL → reload cures ----
+     VM ~$22 vs available ~$5: the call fires (due process). Cure attempt #1
+     (recall alone) CANNOT cover — the recall moves funds home, it adds
+     nothing, and a desk's own locked IM never pays its own VM. The DAILY
+     TREASURY RELOAD (+$20 — exactly what the app's auto-cure wires via the
+     mock on-ramp) then covers it, and the re-cure pays & survives. */
+  const p2 = PATH[PATH.length - 1] * 0.8;
   const crash2 = await oracle({ action: 'tick', instId: inst, price: Number(p2.toFixed(2)), otcIds: [otc] });
-  const calledWithDeadline = (crash2.marginCalls ?? []).filter((m: { deadline: number | null }) => m.deadline != null).length;
-  console.log(`\nsecond crash: $${crash2.mark} | latched ${crash2.triggered} | calls-with-deadline ${calledWithDeadline} | recalled ${crash2.recalled} ($${crash2.recalledAmount})`);
-  if (!crash2.triggered) throw new Error('second crash did not latch');
-  if (calledWithDeadline > 0) throw new Error('expected pay-outright (no margin call) on the second crash');
-  if (!crash2.recalled) throw new Error('fallback recall did not fire on armed-but-no-calls latch');
+  const call2 = (crash2.marginCalls ?? []).find((m: { deadline: number | null }) => m.deadline != null);
+  console.log(`\n⚡ gap: $${crash2.mark} | latched ${crash2.triggered} | margin call ${call2 ? 'RECORDED (deadline ' + new Date(call2.deadline).toISOString().slice(11, 19) + ')' : 'missing'}`);
+  if (!crash2.triggered) throw new Error('the gap did not latch');
+  if (!call2) throw new Error('expected a margin call on the drained desk');
 
-  // stage reset for the real demo
+  const cure1 = await oracle({ action: 'cure', instId: inst, otcIds: [otc] });
+  const c1 = (cure1.cured ?? [])[0];
+  const stillCalled = !c1 || (c1.deadline != null && c1.status === 0);
+  console.log(`cure #1 (recall alone): recalled $${cure1.recalledAmount ?? 0} · ${stillCalled ? 'STILL CALLED — recall cannot ADD capital ✓ (expected)' : 'unexpectedly cleared'}`);
+  if (!stillCalled) throw new Error('recall alone should NOT have covered the VM');
+
+  await run('daily treasury reload (+$20, the capital-call cure)', (tx) => {
+    tx.moveCall({
+      target: `${PKG}::institution::deposit_treasury`,
+      typeArguments: [DBUSDC],
+      arguments: [tx.object(inst), tx.object(adminCap), coinWithBalance({ type: DBUSDC, balance: 20_000_000n })],
+    });
+  });
+  const cure2 = await oracle({ action: 'cure', instId: inst, otcIds: [otc] });
+  const c2 = (cure2.cured ?? [])[0];
+  console.log(`cure #2 (post-reload): deadline=${c2?.deadline ?? 'CLEARED'} status=${c2?.status === 0 ? 'ACTIVE (survived)' : c2?.status}`);
+  if (c2?.deadline != null || c2?.status !== 0) throw new Error('reload cure did not clear the call');
+
+  // cleanup: wait out the contract, close it (frees both $8 fences), recall
+  // what is deployed, sweep the scratch desk back to ops, reset the stage
+  const waitMs = EXPIRY_MS - Date.now() + 3_000;
+  if (waitMs > 0) {
+    console.log(`\nwaiting ${Math.ceil(waitMs / 1000)}s for the drill contract to expire…`);
+    await new Promise((r) => setTimeout(r, waitMs));
+  }
+  await run('close expired drill contract', (tx) => {
+    tx.moveCall({
+      target: `${PKG}::otc_forward::close`,
+      typeArguments: [DBUSDC],
+      arguments: [tx.object(otc), tx.object(inst), tx.object(CUMBERLAND), tx.object('0xac39229ae9e9547582aa607c1bc084b42fd722aa5e74595af16875efcffb4cdd'), tx.object(ALLOWLIST), tx.object(CLOCK)],
+    });
+  });
+  n = await instNums(inst);
+  if (n.rehyp > 0) {
+    await run('recall remaining deploy', (tx) => {
+      tx.moveCall({
+        target: `${PKG}::rehypo::recall`,
+        typeArguments: [DBUSDC],
+        arguments: [tx.object(inst), tx.object(adminCap), tx.object(MARGIN_POOL), tx.object(MARGIN_REGISTRY), tx.pure.u64(BigInt(Math.floor(n.rehyp * 1e6))), tx.object(CLOCK)],
+      });
+    });
+  }
+  n = await instNums(inst);
+  const sweep = Math.max(0, Math.floor((n.liquid - 0.05) * 1e6));
+  if (sweep > 0) {
+    await run('sweep scratch desk back to ops', (tx) => {
+      const c = tx.moveCall({
+        target: `${PKG}::institution::withdraw_treasury`,
+        typeArguments: [DBUSDC],
+        arguments: [tx.object(inst), tx.object(adminCap), tx.pure.u64(BigInt(sweep))],
+      });
+      tx.transferObjects([c], me);
+    });
+  }
   await oracle({ action: 'reset' });
-  console.log('\nPASS — call → cure → survive → release → redeposit, AND armed-but-payable latch still auto-recalls.');
+  console.log('\nPASS — beat 1: pre-empted crash pays outright + fallback recall + release + redeposit; beat 2: gap → MARGIN CALL → recall-alone insufficient (correct) → daily reload cures → survives. Stage clean.');
 }
 
 main().catch((e) => {

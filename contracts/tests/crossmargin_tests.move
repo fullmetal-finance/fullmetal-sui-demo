@@ -20,6 +20,7 @@ use fullmetal::protocol::{Self, OtcAllowlist, ProtocolCap};
 use fullmetal::registry::{Self, HandleRegistry};
 
 public struct FAKE has drop {}
+public struct TEST_OTC has drop {} // second-fence witness (capped-liquidation test)
 
 const OP: address = @0x0B;
 const SUI: vector<u8> = b"SUI";
@@ -232,6 +233,114 @@ fun breach_crank_pool_covers_and_position_survives() {
         clock::destroy_for_testing(clk);
         ts::return_shared(orc);
         ts::return_shared(fwd);
+    };
+    ts::end(sc);
+}
+
+#[test]
+fun side_flip_voids_old_call_and_opens_fresh_window() {
+    let mut sc = ts::begin(OP);
+    // BOTH thin: $210 equity behind the $200 IM fence → $10 free each side
+    let w = setup(&mut sc, 210_000_000, 210_000_000);
+    open_forward(&mut sc, &w, 0);
+
+    // wick UP: short owes $70 > $10 free → margin call AGAINST THE SHORT
+    push(&mut sc, w.keeper, 2_700_000);
+    crank(&mut sc, &w, 0);
+    sc.next_tx(OP);
+    {
+        let fwd = ts::take_shared<OtcForward<FAKE>>(&sc);
+        let side = otc_forward::margin_call_short_owes(&fwd);
+        assert!(option::is_some(&side) && *option::borrow(&side) == true, 60);
+        ts::return_shared(fwd);
+    };
+
+    // mark FLIPS: now the LONG owes $70. The short's call has aged past its
+    // window — pre-fix, this liquidated the long against the short's stale
+    // clock (observed live 2026-07-12). Post-fix: the old window is VOID and
+    // the long gets a FRESH cure window.
+    push(&mut sc, w.keeper, 1_300_000);
+    let flip_ms = CURE_MS + 10_000;
+    crank(&mut sc, &w, flip_ms);
+    sc.next_tx(OP);
+    {
+        let fwd = ts::take_shared<OtcForward<FAKE>>(&sc);
+        assert!(otc_forward::status(&fwd) == 0, 61); // ACTIVE — called, not killed
+        let dl = otc_forward::margin_call_deadline(&fwd);
+        assert!(option::is_some(&dl) && *option::borrow(&dl) == flip_ms + CURE_MS, 62);
+        let side = otc_forward::margin_call_short_owes(&fwd);
+        assert!(option::is_some(&side) && *option::borrow(&side) == false, 63); // long owes now
+        ts::return_shared(fwd);
+    };
+
+    // the LONG's own window elapses uncured → only now does it liquidate
+    crank(&mut sc, &w, flip_ms + CURE_MS);
+    sc.next_tx(OP);
+    {
+        let (ta, tb) = totals(&sc, &w);
+        assert!(ta == 140_000_000 && tb == 280_000_000, 64); // long paid its $70
+        let fwd = ts::take_shared<OtcForward<FAKE>>(&sc);
+        assert!(otc_forward::status(&fwd) == 2, 65); // LIQUIDATED
+        ts::return_shared(fwd);
+    };
+    ts::end(sc);
+}
+
+#[test]
+#[allow(deprecated_usage)]
+fun liquidation_with_second_fence_pays_capped_no_abort() {
+    let mut sc = ts::begin(OP);
+    // short: $290 equity = $200 contract IM + $80 second fence + $10 free
+    let w = setup(&mut sc, 1_000_000_000, 290_000_000);
+    open_forward(&mut sc, &w, 0);
+
+    // a SECOND, unrelated fence on the short (another contract's locked IM)
+    sc.next_tx(OP);
+    {
+        let mut allow = ts::take_shared<OtcAllowlist>(&sc);
+        let pcap = ts::take_from_sender<ProtocolCap>(&sc);
+        protocol::allow_otc_witness(&mut allow, &pcap, type_name::get_with_original_ids<TEST_OTC>().into_string(), sc.ctx());
+        ts::return_to_sender(&sc, pcap);
+        ts::return_shared(allow);
+    };
+    sc.next_tx(OP);
+    {
+        let mut b = ts::take_shared_by_id<Institution<FAKE>>(&sc, w.b_inst);
+        let allow = ts::take_shared<OtcAllowlist>(&sc);
+        let tb = ts::take_from_sender_by_id<TraderCap>(&sc, w.b_trader);
+        institution::reserve_margin<FAKE, TEST_OTC>(
+            &mut b, TEST_OTC {}, &allow, &tb,
+            object::id_from_address(@0xC1), object::id_from_address(@0xB1),
+            80_000_000, 56_000_000,
+        );
+        ts::return_to_sender(&sc, tb);
+        ts::return_shared(allow);
+        ts::return_shared(b);
+    };
+
+    // +125%: short owes $250 — deep insolvency
+    push(&mut sc, w.keeper, 4_500_000);
+    crank(&mut sc, &w, 0); // margin call
+    // Pre-fix this SECOND crank ABORTED (code 22): releasing this contract's
+    // fences left available = $290 − $80 = $210 < the $290 `total`-capped pay,
+    // and begin_settlement asserts pay ≤ available — a liquidation DoS while
+    // any other fence was outstanding (observed live 2026-07-17). Post-fix the
+    // pay is capped at available: the OTHER contract's $80 fence is sacrosanct.
+    crank(&mut sc, &w, CURE_MS);
+    sc.next_tx(OP);
+    {
+        let (ta, tb) = totals(&sc, &w);
+        assert!(ta == 1_210_000_000, 70); // winner got the $210 available
+        assert!(tb == 80_000_000, 71); // exactly the second fence survives
+        let fwd = ts::take_shared<OtcForward<FAKE>>(&sc);
+        assert!(otc_forward::status(&fwd) == 2, 72); // LIQUIDATED, no abort
+        ts::return_shared(fwd);
+    };
+    sc.next_tx(OP);
+    {
+        let b = ts::take_shared_by_id<Institution<FAKE>>(&sc, w.b_inst);
+        assert!(institution::reserved_of(&b) == 80_000_000, 73); // still fenced
+        ts::return_shared(b);
     };
     ts::end(sc);
 }

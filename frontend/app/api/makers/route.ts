@@ -7,6 +7,7 @@ import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { Transaction, coinWithBalance } from "@mysten/sui/transactions";
 
 import { CLOCK, DBUSDC_TYPE, PACKAGE, SHARED, TARGET } from "@/lib/fullmetal";
+import { opsTx } from "@/lib/keeper-queue";
 import { serverSuiClient } from "@/lib/server-sui";
 
 export const runtime = "nodejs";
@@ -27,9 +28,9 @@ export const runtime = "nodejs";
 // three desks the demo operator controls; spread in bps off the live mark —
 // the requester pays the spread (long → makers ask above, short → bid below)
 const MAKERS = [
-  { instPrefix: "0xf6de982c", org: "Cumberland", spreadBps: 12 },
-  { instPrefix: "0x31089de7", org: "Galaxy Digital", spreadBps: 25 },
-  { instPrefix: "0xfb4db2ec", org: "Wintermute", spreadBps: 40 },
+  { instPrefix: "0xf6de982c", org: "Cumberland", spreadBps: 40 },
+  { instPrefix: "0x31089de7", org: "Galaxy Digital", spreadBps: 100 },
+  { instPrefix: "0xfb4db2ec", org: "Wintermute", spreadBps: 175 },
 ];
 
 const QUOTE_TYPE_FRAGMENT = "::rfq::Quote<";
@@ -276,7 +277,7 @@ export async function POST(request: Request) {
             typeArguments: [DBUSDC_TYPE],
             arguments: [fund.object(e.inst), fund.object(e.admin), coinWithBalance({ type: DBUSDC_TYPE, balance: shortfall })],
           });
-          const fr = await c.signAndExecuteTransaction({ signer: kp, transaction: fund, options: { showEffects: true } });
+          const fr = await opsTx(() => c.signAndExecuteTransaction({ signer: kp, transaction: fund, options: { showEffects: true } }));
           await c.waitForTransaction({ digest: fr.digest });
           if (fr.effects?.status.status !== "success") throw new Error(`treasury top-up failed: ${fr.effects?.status.error}`);
         }
@@ -296,7 +297,7 @@ export async function POST(request: Request) {
             q.object(CLOCK),
           ],
         });
-        const r = await c.signAndExecuteTransaction({ signer: kp, transaction: q, options: { showEffects: true, showObjectChanges: true } });
+        const r = await opsTx(() => c.signAndExecuteTransaction({ signer: kp, transaction: q, options: { showEffects: true, showObjectChanges: true } }));
         await c.waitForTransaction({ digest: r.digest });
         if (r.effects?.status.status !== "success") throw new Error(r.effects?.status.error ?? "submit_quote failed");
         const created = (r.objectChanges ?? []).find(

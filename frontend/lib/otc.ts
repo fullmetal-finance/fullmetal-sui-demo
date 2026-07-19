@@ -202,3 +202,48 @@ async function resolveCounterparty(input: string, sender: string): Promise<strin
   }
   return "0x" + bytes.slice(1, 33).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
+
+/** Close (settle) a real OtcForward at/after maturity — permissionless, gasless.
+ *  Reads the contract for both institution legs, then `otc_forward::close`:
+ *  final mark-to-market, both IMs released, status → settled. Forwards can only
+ *  be closed at maturity (early close isn't a forward's semantics); perps have
+ *  no close path. Surfaces those as friendly errors. */
+export function useClosePosition() {
+  const account = useCurrentAccount();
+  const sponsoredExecute = useSponsoredExecute();
+  return useCallback(
+    async (otcId: string): Promise<string> => {
+      if (!account) throw new Error("Sign in first.");
+      const o = await suiRead.getObject({ id: otcId, options: { showContent: true } });
+      const f = (o.data?.content as { fields?: Record<string, string> } | undefined)?.fields;
+      if (!f) throw new Error("Contract not found on-chain.");
+      if (Number(f.status ?? "0") !== 0) throw new Error("This contract is already settled or liquidated.");
+      const expiry = Number(f.expiry_ms ?? "0");
+      if (expiry === 0) throw new Error("Perpetual contracts have no close path (they settle continuously).");
+      if (Date.now() < expiry)
+        throw new Error(`This forward settles at maturity — it can be closed after ${new Date(expiry).toLocaleString()}.`);
+      let digest: string;
+      try {
+        digest = await sponsoredExecute((tx) => {
+          tx.moveCall({
+            target: TARGET.otc.close,
+            typeArguments: [DBUSDC_TYPE],
+            arguments: [
+              tx.object(otcId),
+              tx.object(f.inst_long),
+              tx.object(f.inst_short),
+              tx.object(SHARED.riskOracle),
+              tx.object(SHARED.otcAllowlist),
+              tx.object(CLOCK),
+            ],
+          });
+        });
+      } catch (e) {
+        throw new Error(friendlyMoveError(e instanceof Error ? e.message : String(e)));
+      }
+      await suiRead.waitForTransaction({ digest });
+      return digest;
+    },
+    [account, sponsoredExecute],
+  );
+}

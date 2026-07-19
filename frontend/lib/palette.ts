@@ -17,9 +17,17 @@ export const STATUS = {
   green: "#1f6f4d",
 } as const;
 
-/** Per-venue accent hues for the collateral manager cards. */
+/** Collateral-MOVEMENT colors — deliberately vivid/saturated so the back-and-
+ *  forth (deploy out to earn / recall home on risk) reads across a demo room. */
+export const FLOW = {
+  deploy: "#16a34a", // collateral going OUT to venues (vivid green)
+  recall: "#e11d2e", // collateral pulled HOME on risk (vivid red)
+} as const;
+
+/** Per-venue accent hues for the collateral manager cards — brightened for
+ *  demo legibility (the allocation strip's segments move as collateral flows). */
 export const VENUE_ACCENT: Record<"deepbook" | "suilend" | "navi", string> = {
-  deepbook: "#2456c4",
-  suilend: "#0d9488",
-  navi: "#b45309",
+  deepbook: "#2563eb",
+  suilend: "#0ea5a0",
+  navi: "#ea580c",
 };

@@ -7,6 +7,7 @@ import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { Transaction } from "@mysten/sui/transactions";
 
 import { CLOCK, DBUSDC_TYPE, DEEPBOOK, SHARED, SPCX, SPCX_VOL, TARGET } from "@/lib/fullmetal";
+import { opsTx } from "@/lib/keeper-queue";
 import { serverSuiClient } from "@/lib/server-sui";
 
 export const runtime = "nodejs";
@@ -290,6 +291,11 @@ export async function POST(request: Request) {
       return Response.json(await readStatus(c, typeof instId === "string" ? instId : undefined));
     }
 
+    // Every remaining action WRITES with the ops key. Serialize them — two
+    // concurrent keeper txs equivocate on the gas coin and get rejected by
+    // >1/3 of validators (see lib/keeper-queue.ts).
+    return await opsTx(async () => {
+
     /* One scenario tick: keeper pushes the mark through the EWMA layer, then a
        same-node status read. On a latch:
         - with `otcIds` (drill armed): crank the breached contracts FIRST —
@@ -450,6 +456,7 @@ export async function POST(request: Request) {
       });
     }
     return Response.json({ digest: res.digest, ...(await readStatus(c)) });
+    });
   } catch (e) {
     return Response.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });
   }

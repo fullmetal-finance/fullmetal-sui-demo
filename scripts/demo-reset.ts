@@ -1,6 +1,6 @@
 /**
  * One-command clean stage for a demo run:
- *   1. SPCX feed → $185, trigger cleared, EWMA re-seeded (σ=150bps, λ=0.60)
+ *   1. SPCX feed → $148, trigger cleared, EWMA re-seeded (σ=150bps, λ=0.60)
  *   2. prints ops balances (SUI gas + DBUSDC for the faucet/makers)
  *   3. verifies the three maker desks still hold Admin+Trader caps
  *   4. prints the RPC endpoints in use and a pre-flight checklist
@@ -17,13 +17,13 @@ import { Transaction } from '@mysten/sui/transactions';
 
 import { TESTNET_JSONRPC_URL } from './rpc';
 
-const PKG = '0xf8b57f09dfe5e59fcc176110c8f15cf96b27f6f23be8a4db959529d896635a4a';
+const PKG = '0x141f7de4ea75cde406d424a0669e17e34352ef9fd594bcae6f0139ef6dd74700';
 const RISK_ORACLE = '0xac39229ae9e9547582aa607c1bc084b42fd722aa5e74595af16875efcffb4cdd';
 const ORACLE_ADMIN_CAP = '0x33adac6f64ae3ecb1af395de98f9a4f0708d1d97f4848a32dc428a7b9e651b87';
 const KEEPER_CAP = '0x3767fad45d82370652ccec28025f83545833ee7f2e1567042b7f5067a3ab1e3a';
 const CLOCK = '0x6';
 const SYMBOL = 'SPCX';
-const NOMINAL = 185_000_000n;
+const NOMINAL = 148_000_000n; // ≈ real SPCX (Nasdaq, July 2026)
 const DBUSDC = '0xf7152c05930480cd740d7311b5b8b45c6f488e3a53a11c3f74a6fac36a52e0d7::DBUSDC::DBUSDC';
 
 // must match frontend/lib/fullmetal.ts SPCX_VOL + post-upgrade-setup.ts
@@ -79,7 +79,7 @@ async function main() {
   const res = await client.signAndExecuteTransaction({ signer: kp, transaction: tx, options: { showEffects: true } });
   await client.waitForTransaction({ digest: res.digest });
   if (res.effects?.status.status !== 'success') throw new Error('reset failed: ' + JSON.stringify(res.effects?.status));
-  console.log(`✓ SPCX → $185, untriggered, EWMA re-seeded (σ 150 bps, λ 0.60)  ${res.digest}`);
+  console.log(`✓ SPCX → $148, untriggered, EWMA re-seeded (σ 150 bps, λ 0.60)  ${res.digest}`);
 
   // 2. ops balances
   const [sui, dbusdc] = await Promise.all([
@@ -116,10 +116,10 @@ async function main() {
 pre-flight:
   [ ] cd frontend && npm run dev          (http://localhost:3000)
   [ ] sign in with the demo Google account; institution loads
-  [ ] Load funds $100 → broadcast SPCX RFQ (IM ≥ 5% of notional) → accept best quote
+  [ ] Load funds $42 → broadcast SPCX RFQ (IM ≥ 5% of notional, default $8) → accept best quote
   [ ] optional drill: New OTC → Direct to "cumberland", 1 SPCX long — makers auto-accept? NO:
       run  npx tsx accept-direct.ts <offerId>  after proposing (see DEMO.md)
-  [ ] Collateral manager: deploy across DeepBook (real) + Suilend/Navi (sim) until liquid < ~VM-at-crash
+  [ ] Collateral manager: IM auto-deploys on accept (IM-only policy); rebalance across venues if desired
   [ ] ▶ Start live market → let it tick → 💥 Crash — latch → margin call → auto-cure → release → redeposit
 `);
 }

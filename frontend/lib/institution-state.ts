@@ -81,16 +81,20 @@ export async function readUserContracts(
   const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
   const name = myTraderName?.trim();
   const rows: import("./mock").MockPosition[] = [];
+  const cptyIds = new Set<string>();
   for (const o of objs) {
     const f = (o.data?.content as { fields?: Record<string, string> } | undefined)?.fields;
     if (!f) continue;
     const isLong = f.inst_long === myInstId;
+    const cptyId = isLong ? f.inst_short : f.inst_long;
+    if (cptyId) cptyIds.add(cptyId);
     rows.push({
       asset: f.underlying ?? "—",
       side: isLong ? "long" : "short",
       // the contract is ours, so the trader on our leg is the signed-in admin
       trader: name || short(isLong ? f.trader_long : f.trader_short),
-      cpty: short(isLong ? f.inst_short : f.inst_long),
+      cpty: short(cptyId ?? ""), // provisional — replaced by the handle below
+      cptyId,
       notional: fromUnits(f.notional_6dp ?? "0"),
       entry: fromUnits(f.entry_price ?? "0"),
       mark: fromUnits(f.last_mark ?? f.entry_price ?? "0"),
@@ -102,8 +106,40 @@ export async function readUserContracts(
       expiryMs: Number(f.expiry_ms ?? "0"),
     });
   }
+  // Counterparty NAME resolution, best → fallback:
+  //   1. a known maker desk → its friendly display name (matches the RFQ inbox)
+  //   2. else its registered on-chain handle
+  //   3. else the shortened address
+  if (cptyIds.size) {
+    let handleById = new Map<string, string>();
+    try {
+      const cObjs = await suiRead.multiGetObjects({ ids: [...cptyIds], options: { showContent: true } });
+      for (const co of cObjs) {
+        const h = (co.data?.content as { fields?: { handle?: string } } | undefined)?.fields?.handle;
+        if (co.data?.objectId && h) handleById.set(co.data.objectId, h);
+      }
+    } catch {
+      handleById = new Map(); // read failed — maker names + short-address fallback still apply
+    }
+    for (const r of rows) {
+      if (!r.cptyId) continue;
+      const maker = MAKER_DISPLAY_NAMES.find((m) => r.cptyId!.startsWith(m.prefix));
+      if (maker) { r.cpty = maker.name; continue; }
+      const h = handleById.get(r.cptyId);
+      if (h) r.cpty = h;
+    }
+  }
   return rows;
 }
+
+/** The three operator-run maker desks, mapped to the friendly names the RFQ
+ *  inbox shows (their on-chain handles differ). Keep in sync with
+ *  `app/api/makers/route.ts`. */
+const MAKER_DISPLAY_NAMES: { prefix: string; name: string }[] = [
+  { prefix: "0xf6de982c", name: "Cumberland" },
+  { prefix: "0x31089de7", name: "Galaxy Digital" },
+  { prefix: "0xfb4db2ec", name: "Wintermute" },
+];
 
 /** Per-contract cross-margin health for the margin panel: live status, whether
  *  the MM buffer is breached at the current oracle mark, and a pending
@@ -113,6 +149,9 @@ export type ContractHealth = {
   status: number; // 0 active · 1 settled · 2 liquidated
   breached: boolean;
   callDeadlineMs: number | null;
+  /** which side the pending call is AGAINST: true = short owes, false = long
+   *  owes, null = no call (or a pre-upgrade call recorded without a side) */
+  callShortOwes: boolean | null;
 };
 
 export async function readContractsHealth(otcIds: string[]): Promise<ContractHealth[]> {
@@ -129,18 +168,26 @@ export async function readContractsHealth(otcIds: string[]): Promise<ContractHea
       typeArguments: [DBUSDC_TYPE],
       arguments: [tx.object(id)],
     });
+    tx.moveCall({
+      target: TARGET.otc.marginCallShortOwes,
+      typeArguments: [DBUSDC_TYPE],
+      arguments: [tx.object(id)],
+    });
   }
   const [r, objs] = await Promise.all([
     suiRead.devInspectTransactionBlock({ sender: READER, transactionBlock: tx }),
     suiRead.multiGetObjects({ ids: otcIds, options: { showContent: true } }),
   ]);
   return otcIds.map((otcId, i) => {
-    const breached = (r.results?.[2 * i]?.returnValues?.[0]?.[0] as number[] | undefined)?.[0] === 1;
+    const breached = (r.results?.[3 * i]?.returnValues?.[0]?.[0] as number[] | undefined)?.[0] === 1;
     // Option<u64> BCS: [0] = none · [1, 8 bytes LE] = some(deadline)
-    const ob = (r.results?.[2 * i + 1]?.returnValues?.[0]?.[0] ?? []) as number[];
+    const ob = (r.results?.[3 * i + 1]?.returnValues?.[0]?.[0] ?? []) as number[];
     const callDeadlineMs = ob[0] === 1 ? Number(decodeU64(ob.slice(1, 9))) : null;
+    // Option<bool> BCS: [0] = none · [1, b] = some(short_owes)
+    const os = (r.results?.[3 * i + 2]?.returnValues?.[0]?.[0] ?? []) as number[];
+    const callShortOwes = os[0] === 1 ? os[1] === 1 : null;
     const f = (objs[i]?.data?.content as { fields?: Record<string, string> } | undefined)?.fields;
-    return { otcId, status: Number(f?.status ?? "0"), breached, callDeadlineMs };
+    return { otcId, status: Number(f?.status ?? "0"), breached, callDeadlineMs, callShortOwes };
   });
 }
 

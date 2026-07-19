@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { SPCX_VOL, usd } from "@/lib/fullmetal";
-import { CHART, STATUS } from "@/lib/palette";
+import { CHART, FLOW, STATUS } from "@/lib/palette";
 
 /* The live market chart: the price feed (top, blue) + the EWMA σ signal the
    protocol actually reads (bottom, violet) on one shared x-axis of oracle
@@ -177,18 +177,18 @@ export default function ScenarioChart({
           if (!p) return null;
           const cx = x(ev.i);
           const isRecall = ev.kind === "recall";
-          const color = isRecall ? RED : GREEN;
+          const color = isRecall ? FLOW.recall : FLOW.deploy;
           const label = isRecall ? `▼ RECALL ${usd(ev.amount, { maximumFractionDigits: 0 })}` : `▲ REDEPOSIT ${usd(ev.amount, { maximumFractionDigits: 0 })}`;
           const flip = cx > width - PAD_R - 150;
           return (
-            <g key={`${ev.kind}${ev.tick}`}>
-              <line x1={cx} y1={TOP - 2} x2={cx} y2={sigmaTop + SIGMA_H} stroke={color} strokeWidth="1.5" opacity="0.9" />
-              <circle cx={cx} cy={yPrice(p.price)} r="6.5" fill={color} stroke="var(--color-surface)" strokeWidth="2" />
+            <g key={`${ev.kind}${ev.tick}`} style={{ filter: `drop-shadow(0 0 4px ${color}aa)` }}>
+              <line x1={cx} y1={TOP - 2} x2={cx} y2={sigmaTop + SIGMA_H} stroke={color} strokeWidth="2.5" />
+              <circle cx={cx} cy={yPrice(p.price)} r="8" fill={color} stroke="var(--color-surface)" strokeWidth="2.5" />
               <text
-                x={flip ? cx - 7 : cx + 7}
+                x={flip ? cx - 8 : cx + 8}
                 y={isRecall ? TOP + 8 : TOP + 22}
                 textAnchor={flip ? "end" : "start"}
-                fontSize="10.5"
+                fontSize="11.5"
                 fontWeight="700"
                 fontFamily="var(--font-mono)"
                 fill={color}

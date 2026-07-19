@@ -5,11 +5,13 @@
 module fullmetal::risk_tests;
 
 use std::string;
+use std::type_name;
 use sui::clock;
 use sui::coin;
 use sui::test_scenario as ts;
-use fullmetal::institution::{Self, Institution, AdminCap};
+use fullmetal::institution::{Self, Institution, AdminCap, TraderCap};
 use fullmetal::oracle::{Self, RiskOracle, OracleAdminCap, KeeperCap};
+use fullmetal::protocol::{Self, OtcAllowlist, ProtocolCap};
 use fullmetal::registry::{Self, HandleRegistry};
 use fullmetal::rehypo_router as router;
 
@@ -19,6 +21,7 @@ public struct FAKE has drop {}
 
 /// Stand-in for a venue receipt (SupplierCap / CToken / AccountCap).
 public struct FakeReceipt has store {}
+public struct TEST_OTC has drop {}
 
 // --- helpers -------------------------------------------------------
 
@@ -88,6 +91,50 @@ fun setup_institution(sc: &mut ts::Scenario, amount: u64) {
         let cap = ts::take_from_sender<AdminCap>(sc);
         institution::deposit_treasury(&mut inst, &cap, coin::mint_for_testing<FAKE>(amount, sc.ctx()), sc.ctx());
         ts::return_to_sender(sc, cap);
+        ts::return_shared(inst);
+    };
+}
+
+/// Reserve `im` as locked margin through the witness seam — since the IM-only
+/// policy moved on-chain, deploys need locked IM to count against.
+#[allow(deprecated_usage)]
+fun lock_im(sc: &mut ts::Scenario, im: u64) {
+    protocol::init_for_testing(sc.ctx());
+    sc.next_tx(ADMIN);
+    {
+        let mut allow = ts::take_shared<OtcAllowlist>(sc);
+        let pcap = ts::take_from_sender<ProtocolCap>(sc);
+        let wname = type_name::get_with_original_ids<TEST_OTC>().into_string();
+        protocol::allow_otc_witness(&mut allow, &pcap, wname, sc.ctx());
+        ts::return_to_sender(sc, pcap);
+        ts::return_shared(allow);
+    };
+    sc.next_tx(ADMIN);
+    {
+        let mut inst = ts::take_shared<Institution<FAKE>>(sc);
+        let cap = ts::take_from_sender<AdminCap>(sc);
+        let tcap = institution::grant_trader(&mut inst, &cap, ADMIN, im, sc.ctx());
+        transfer::public_transfer(tcap, ADMIN);
+        ts::return_to_sender(sc, cap);
+        ts::return_shared(inst);
+    };
+    sc.next_tx(ADMIN);
+    {
+        let mut inst = ts::take_shared<Institution<FAKE>>(sc);
+        let allow = ts::take_shared<OtcAllowlist>(sc);
+        let tcap = ts::take_from_sender<TraderCap>(sc);
+        institution::reserve_margin<FAKE, TEST_OTC>(
+            &mut inst,
+            TEST_OTC {},
+            &allow,
+            &tcap,
+            object::id_from_address(@0xC0),
+            object::id_from_address(@0xB0),
+            im,
+            im * 7 / 10,
+        );
+        ts::return_to_sender(sc, tcap);
+        ts::return_shared(allow);
         ts::return_shared(inst);
     };
 }
@@ -231,6 +278,7 @@ fun push_v2_without_vol_state_keeps_legacy_behavior() {
 fun ticket_roundtrip_supply_then_recall_accounting() {
     let mut sc = ts::begin(ADMIN);
     setup_institution(&mut sc, 1_000);
+    lock_im(&mut sc, 500); // IM-only policy: the 400 deploy counts against locked IM
 
     sc.next_tx(ADMIN);
     {
@@ -291,6 +339,7 @@ fun floor_blocks_deploy() {
 fun floor_allows_deploy_up_to_surplus() {
     let mut sc = ts::begin(ADMIN);
     setup_institution(&mut sc, 1_000);
+    lock_im(&mut sc, 100); // IM-only policy: the 100 deploy needs locked IM
     sc.next_tx(ADMIN);
     {
         let mut inst = ts::take_shared<Institution<FAKE>>(&sc);
@@ -301,6 +350,26 @@ fun floor_allows_deploy_up_to_surplus() {
         router::confirm_rehypo(&mut inst, t, option::some(FakeReceipt {}), sc.ctx());
         transfer::public_transfer(c, ADMIN);
         assert!(institution::total(&inst) == 900, 302);
+        ts::return_to_sender(&sc, cap);
+        ts::return_shared(inst);
+    };
+    sc.end();
+}
+
+#[test]
+#[expected_failure] // EOverLockedIm: only the locked margin is rehypothecated
+fun deploy_beyond_locked_im_aborts() {
+    let mut sc = ts::begin(ADMIN);
+    setup_institution(&mut sc, 1_000);
+    lock_im(&mut sc, 100);
+    sc.next_tx(ADMIN);
+    {
+        let mut inst = ts::take_shared<Institution<FAKE>>(&sc);
+        let cap = ts::take_from_sender<AdminCap>(&sc);
+        // 200 > the 100 of locked IM → free liquidity may not leave the treasury
+        let (c, t) = router::withdraw_for_rehypo(&mut inst, &cap, router::venue_navi(), 200, sc.ctx());
+        router::confirm_rehypo(&mut inst, t, option::some(FakeReceipt {}), sc.ctx());
+        transfer::public_transfer(c, ADMIN);
         ts::return_to_sender(&sc, cap);
         ts::return_shared(inst);
     };

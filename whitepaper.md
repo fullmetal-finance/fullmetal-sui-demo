@@ -26,9 +26,12 @@ value without the fear. Specifically:
 1. **One pooled treasury per institution, cross-margined** — initial margin is an
    accounting fence (`reserved`), not a transfer, so one desk's collateral backs all its
    positions simultaneously.
-2. **Idle margin earns** — the unfenced surplus is rehypothecated into on-chain lending
+2. **Idle margin earns** — locked margin is rehypothecated into on-chain lending
    venues (DeepBook margin, Suilend, Navi), held as receipts custodied *by the
-   institution object itself*.
+   institution object itself*. (MVP posture: only the **reserved IM** is deployed;
+   free liquidity — the VM/PnL buffer the institution reloads daily — stays liquid
+   until the §6 control loop is production-calibrated. Routing all liquidity from
+   day one would concentrate hack surface for no proven yield-at-risk trade-off.)
 3. **Risk response is a permissionless on-chain control loop** — a volatility trigger
    latches and *anyone* can crank the recall; collateral auto-deleverages back to liquid
    without trusting an operator to act.

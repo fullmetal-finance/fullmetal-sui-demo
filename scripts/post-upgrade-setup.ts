@@ -22,14 +22,14 @@ import { Transaction } from '@mysten/sui/transactions';
 import { TESTNET_JSONRPC_URL } from './rpc';
 
 // current package (post-upgrade) — new oracle entry points live here
-const PKG = '0xf8b57f09dfe5e59fcc176110c8f15cf96b27f6f23be8a4db959529d896635a4a';
+const PKG = '0x141f7de4ea75cde406d424a0669e17e34352ef9fd594bcae6f0139ef6dd74700';
 const RISK_ORACLE = '0xac39229ae9e9547582aa607c1bc084b42fd722aa5e74595af16875efcffb4cdd';
 const ORACLE_ADMIN_CAP = '0x33adac6f64ae3ecb1af395de98f9a4f0708d1d97f4848a32dc428a7b9e651b87';
 const KEEPER_CAP = '0x3767fad45d82370652ccec28025f83545833ee7f2e1567042b7f5067a3ab1e3a';
 const CLOCK = '0x6';
 
 const SYMBOL = 'SPCX';
-const NOMINAL = 185_000_000n; // $185.00
+const NOMINAL = 148_000_000n; // ≈ real SPCX (Nasdaq, July 2026)
 
 // EWMA calibration (demo cadence — see header)
 const SEED_SIGMA_BPS = 150n; // 1.5%/print warm start

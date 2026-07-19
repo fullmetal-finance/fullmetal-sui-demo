@@ -158,9 +158,6 @@ export default function MarkChart({
         <div className="mt-2">
           <CandleChart candles={candles} height={118} compact />
         </div>
-        <p className="mt-1.5 text-[10.5px] text-faint">
-          since the {fmtDay(IPO_DATE)} IPO (priced ${IPO_PRICE}) · today&apos;s candle is live — it closes at the mark your contract settles on
-        </p>
       </button>
 
       {expanded && (
@@ -236,11 +233,6 @@ function Expanded({
         <div className="mt-4 min-h-0 flex-1">
           <CandleChart candles={candles} height={460} withAxes withHover />
         </div>
-
-        <p className="mt-3 font-mono text-[10.5px] leading-[1.6] text-faint">
-          {symbol} listed on Nasdaq {fmtDay(IPO_DATE)}, 2026 (IPO ${IPO_PRICE}) · today&apos;s candle is live — its close is the
-          Fullmetal keeper mark, the level every contract settles against.
-        </p>
       </div>
     </div>
   );

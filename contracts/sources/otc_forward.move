@@ -94,6 +94,15 @@ public struct ContractLiquidated has copy, drop { otc_id: ID, mark: u64, recover
 /// Dynamic-field key for a pending margin call (value: the call's ms timestamp).
 public struct MarginCallKey has copy, drop, store {}
 
+/// Dynamic-field key recording WHICH side owed when the pending call was
+/// opened (value: bool, true = short owes). A margin call is due process for
+/// ONE debtor: if the owing side flips before enforcement, the old window is
+/// void and the new loser gets a FRESH cure window — without this, a side flip
+/// liquidated the new loser against the old side's aged clock (observed live
+/// 2026-07-12). Calls recorded before this upgrade carry no side and are
+/// re-opened fresh on their next enforcement touch.
+public struct CallSideKey has copy, drop, store {}
+
 /// An insolvent MM breach was recorded; the desk has until `deadline_ms` to
 /// cure (deposit / recall from venues / mean-reversion) before a still-live
 /// breach becomes liquidatable.
@@ -347,10 +356,34 @@ public fun margin_call_deadline<C>(fwd: &OtcForward<C>): Option<u64> {
     } else option::none()
 }
 
+/// Which side the pending margin call is AGAINST: some(true) = the short owes,
+/// some(false) = the long owes; none = no pending call on a live contract (or
+/// a pre-upgrade call recorded before side tracking — treated as void at the
+/// next enforcement touch). For the keeper/UI: the call belongs to ONE debtor.
+public fun margin_call_short_owes<C>(fwd: &OtcForward<C>): Option<bool> {
+    if (
+        fwd.status == STATUS_ACTIVE
+            && df::exists_<MarginCallKey>(&fwd.id, MarginCallKey {})
+            && df::exists_<CallSideKey>(&fwd.id, CallSideKey {})
+    ) {
+        option::some(*df::borrow<CallSideKey, bool>(&fwd.id, CallSideKey {}))
+    } else option::none()
+}
+
 fun clear_margin_call<C>(fwd: &mut OtcForward<C>) {
     if (df::exists_<MarginCallKey>(&fwd.id, MarginCallKey {})) {
         df::remove<MarginCallKey, u64>(&mut fwd.id, MarginCallKey {});
+    };
+    if (df::exists_<CallSideKey>(&fwd.id, CallSideKey {})) {
+        df::remove<CallSideKey, bool>(&mut fwd.id, CallSideKey {});
     }
+}
+
+/// Open a fresh margin call against the CURRENT loser and start its cure clock.
+fun record_margin_call<C>(fwd: &mut OtcForward<C>, short_owes: bool, mark: u64, owed: u64, now: u64) {
+    df::add(&mut fwd.id, MarginCallKey {}, now);
+    df::add(&mut fwd.id, CallSideKey {}, short_owes);
+    event::emit(MarginCalled { otc_id: object::id(fwd), mark, owed, deadline_ms: now + CURE_WINDOW_MS });
 }
 
 /// MAINTENANCE-BREACH CRANK — permissionless, no cadence gate. Makes
@@ -455,8 +488,18 @@ fun settle_at_mark<C>(
     // covers BOTH the cadence and breach paths (previously `settle` liquidated
     // insolvency instantly, bypassing it).
     if (!df::exists_<MarginCallKey>(&fwd.id, MarginCallKey {})) {
-        df::add(&mut fwd.id, MarginCallKey {}, now);
-        event::emit(MarginCalled { otc_id, mark, owed: amount, deadline_ms: now + CURE_WINDOW_MS });
+        record_margin_call(fwd, short_pays_long, mark, amount, now);
+        return
+    };
+    // A pending call is due process for ONE debtor. If the owing side flipped
+    // since it was recorded (or the call predates side tracking), the old
+    // window is VOID — the current loser gets a FRESH cure window instead of
+    // being liquidated against the other side's aged clock.
+    let side_matches = df::exists_<CallSideKey>(&fwd.id, CallSideKey {})
+        && *df::borrow<CallSideKey, bool>(&fwd.id, CallSideKey {}) == short_pays_long;
+    if (!side_matches) {
+        clear_margin_call(fwd);
+        record_margin_call(fwd, short_pays_long, mark, amount, now);
         return
     };
     let called_ms = *df::borrow<MarginCallKey, u64>(&fwd.id, MarginCallKey {});
@@ -589,12 +632,15 @@ fun final_settle<C>(
     let otc_id = object::id(fwd);
     institution::release_margin<C, OtcWitness>(payer, OtcWitness {}, allow, otc_id);
     institution::release_margin<C, OtcWitness>(payee, OtcWitness {}, allow, otc_id);
-    // Pay the winner what the loser physically has, capped at what is owed.
-    // `total` (physical liquid), not `available`: releasing the IM fences raised
-    // `available`, but only physically-liquid funds can actually be transferred —
-    // anything still at a venue stays the loser's (recall it before/within the
-    // cure window to avoid short-paying the winner).
-    let pay = min(owed, institution::total(payer));
+    // Pay the winner what the loser can LEGALLY and PHYSICALLY hand over:
+    // capped at what is owed, at `total` (physical liquid — funds still at a
+    // venue stay the loser's; recall before/within the cure window to avoid
+    // short-paying the winner), AND at `available` — any OTHER contract's
+    // locked IM is sacrosanct, it protects a different counterparty. Without
+    // the `available` cap a deep insolvency with a second fence outstanding
+    // ABORTED in begin_settlement (code 22): a liquidation DoS that also
+    // killed the breach crank (observed live 2026-07-17).
+    let pay = min(min(owed, institution::total(payer)), institution::available(payer));
     transfer_net(payer, payee, allow, otc_id, pay, ctx);
     fwd.status = new_status;
     clear_margin_call(fwd);

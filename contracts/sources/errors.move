@@ -25,6 +25,7 @@ const EWouldUnderfundReserved: u64 = 21; // withdraw > available (breaks total >
 const EInsufficientTreasury: u64 = 22; // reserve/settlement exceeds available
 const EInsufficientLiquidity: u64 = 23; // economically free but physically rehypothecated; recall first
 const EBelowLiquidityFloor: u64 = 24; // deploy would leave liquid treasury under the risk floor F
+const EOverLockedIm: u64 = 25; // deploy would exceed the locked IM (IM-only rehypothecation policy)
 
 // --- traders / limits (30–39) ---
 const ETraderExists: u64 = 30;
@@ -102,6 +103,7 @@ public(package) fun e_would_underfund_reserved(): u64 { EWouldUnderfundReserved 
 public(package) fun e_insufficient_treasury(): u64 { EInsufficientTreasury }
 public(package) fun e_insufficient_liquidity(): u64 { EInsufficientLiquidity }
 public(package) fun e_below_liquidity_floor(): u64 { EBelowLiquidityFloor }
+public(package) fun e_over_locked_im(): u64 { EOverLockedIm }
 public(package) fun e_trader_exists(): u64 { ETraderExists }
 public(package) fun e_no_such_trader(): u64 { ENoSuchTrader }
 public(package) fun e_over_book_size(): u64 { EOverBookSize }

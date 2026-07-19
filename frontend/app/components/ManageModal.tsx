@@ -2,8 +2,9 @@
 
 import { useState } from "react";
 
-import { usd } from "@/lib/fullmetal";
+import { explorer, usd } from "@/lib/fullmetal";
 import { positionPnl, type MockPosition, type MockTrader } from "@/lib/mock";
+import { useClosePosition } from "@/lib/otc";
 
 /* A management pop-up for a clicked blotter position or trader. The controls are
    mocked for the demo (no on-chain effect) — they exist to show the desk-admin
@@ -15,9 +16,11 @@ export type ManageSubject =
 export default function ManageModal({
   subject,
   onClose,
+  onRefresh,
 }: {
   subject: ManageSubject | null;
   onClose: () => void;
+  onRefresh?: () => void;
 }) {
   if (!subject) return null;
   return (
@@ -30,7 +33,7 @@ export default function ManageModal({
         onClick={(e) => e.stopPropagation()}
       >
         {subject.kind === "position" ? (
-          <PositionBody p={subject.position} onClose={onClose} />
+          <PositionBody p={subject.position} onClose={onClose} onRefresh={onRefresh} />
         ) : (
           <TraderBody t={subject.trader} onClose={onClose} />
         )}
@@ -39,10 +42,33 @@ export default function ManageModal({
   );
 }
 
-function PositionBody({ p, onClose }: { p: MockPosition; onClose: () => void }) {
+function PositionBody({ p, onClose, onRefresh }: { p: MockPosition; onClose: () => void; onRefresh?: () => void }) {
   const pnl = positionPnl(p);
   const up = pnl >= 0;
+  const closePosition = useClosePosition();
+  const isReal = !!p.otcId;
+  const isPerp = (p.expiryMs ?? 0) === 0 && /perp/i.test(p.maturity);
+  const expired = (p.expiryMs ?? 0) > 0 && Date.now() >= (p.expiryMs ?? 0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState<string | null>(null);
   const [acted, setActed] = useState<string | null>(null);
+
+  async function doClose() {
+    if (!p.otcId) return;
+    setError(null);
+    setBusy(true);
+    try {
+      const digest = await closePosition(p.otcId);
+      setDone(digest);
+      onRefresh?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <>
       <Header
@@ -60,8 +86,8 @@ function PositionBody({ p, onClose }: { p: MockPosition; onClose: () => void }) 
       />
       <div className="mt-5 divide-y divide-line border-y border-line">
         <Detail label="Notional" value={usd(p.notional, { maximumFractionDigits: 0 })} />
-        <Detail label="Entry" value={usd(p.entry)} />
-        <Detail label="Mark" value={usd(p.mark)} />
+        <Detail label="Forward price (entry)" value={usd(p.entry)} />
+        <Detail label="Mark (current)" value={usd(p.mark)} />
         <Detail
           label="Unrealized PnL"
           value={`${up ? "+" : "−"}${usd(Math.abs(pnl), { maximumFractionDigits: 0 })}`}
@@ -71,15 +97,46 @@ function PositionBody({ p, onClose }: { p: MockPosition; onClose: () => void }) 
         <Detail label="Rehypothecated to" value={p.venue} />
         <Detail label="Tenor" value={/perp/i.test(p.maturity) ? "∞ Perp" : p.maturity} />
       </div>
-      {acted ? (
+
+      {done ? (
+        <div className="mt-5 rounded-[8px] border border-line bg-bg px-3 py-3 text-center text-[13px] text-ink">
+          Position closed & settled —{" "}
+          <a href={explorer.tx(done)} target="_blank" rel="noreferrer" className="font-mono text-[12px] text-muted underline hover:text-ink">
+            {done.slice(0, 12)}… ↗
+          </a>
+        </div>
+      ) : isReal ? (
+        <div className="mt-5 space-y-2.5">
+          <button
+            onClick={doClose}
+            disabled={busy || isPerp || !expired}
+            title={isPerp ? "Perpetual — no close path" : !expired ? `Forwards settle at maturity (${p.maturity})` : "Final mark-to-market, release both IMs, settle"}
+            className={`${btnPrimary} disabled:opacity-40`}
+          >
+            {busy
+              ? "Closing on-chain…"
+              : isPerp
+                ? "Perpetual — no close"
+                : !expired
+                  ? `Settles at maturity · ${p.maturity}`
+                  : "Close position"}
+          </button>
+          {error && <p className="break-words text-[12px] leading-[1.6] text-[#b4341f]">{error}</p>}
+          {!expired && !isPerp && (
+            <p className="text-center text-[11px] text-faint">A forward settles at maturity — close frees both IMs then.</p>
+          )}
+        </div>
+      ) : acted ? (
         <Acted label={acted} />
       ) : (
-        <div className="mt-5 space-y-2.5">
-          <button onClick={() => setActed("Margin top-up")} className={btnSecondary}>Add margin</button>
-          <button onClick={() => setActed("Position close")} className={btnPrimary}>Close position</button>
-        </div>
+        <>
+          <div className="mt-5 space-y-2.5">
+            <button onClick={() => setActed("Margin top-up")} className={btnSecondary}>Add margin</button>
+            <button onClick={() => setActed("Position close")} className={btnPrimary}>Close position</button>
+          </div>
+          <Footnote />
+        </>
       )}
-      <Footnote />
     </>
   );
 }
