@@ -111,28 +111,6 @@ export default function CreateOtcModal({
     return true;
   }, [notional, im, asset, imValid, entry, counterparty, strike]);
 
-  // Discreet demo prefill — fills whichever entry mode is currently selected.
-  //   direct → SHORT SPCX vs Cumberland, 1 unit, forward 160, $8 IM each side
-  //   rfq    → go LONG SPCX, 1.5 units; IM tracks the live mark (maker sets price)
-  function fillDemo() {
-    setError(null);
-    setAsset("SPCX");
-    if (entry === "direct") {
-      setSide("short");
-      setCounterparty("cumberland");
-      setNotional(1);
-      setStrike(160);
-      setStrikeTouched(true); // pin the strike at 160 (don't snap to live mark)
-      setIm(8);
-      setImTouched(true); // pin IM at $8 (don't re-prefill from notional)
-    } else {
-      setSide("long");
-      setNotional(1.5);
-      setStrikeTouched(false); // strike is the maker's to set; let it track the mark
-      setImTouched(false); // IM prefills from the live mark (≈ $11 at ~$148 × 1.5)
-    }
-  }
-
   if (!open) return null;
 
   async function submit() {
@@ -175,23 +153,7 @@ export default function CreateOtcModal({
       >
         <div className="flex items-center justify-between">
           <h2 className="text-[18px] tracking-[-0.01em]">New OTC contract</h2>
-          <div className="flex items-center gap-3.5">
-            {!done && (
-              <button
-                type="button"
-                onClick={fillDemo}
-                title={
-                  entry === "direct"
-                    ? "Prefill a sample short SPCX vs Cumberland (forward 160, $8 IM)"
-                    : "Prefill a sample long SPCX RFQ (1.5 units; maker sets price)"
-                }
-                className="font-mono text-[11px] text-faint transition-colors hover:text-muted"
-              >
-                ⚡ demo fill
-              </button>
-            )}
-            <button onClick={onClose} className="text-[18px] text-muted hover:text-ink">×</button>
-          </div>
+          <button onClick={onClose} className="text-[18px] text-muted hover:text-ink">×</button>
         </div>
 
         {done ? (

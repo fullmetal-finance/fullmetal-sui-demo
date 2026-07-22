@@ -31,20 +31,6 @@ const EMPTY: Profile = {
   handle: "",
 };
 
-// Demo institution — the "Auto-fill" button drops this straight into the form.
-// (phone + jurisdiction are inferred from the Mumbai address; edit freely.)
-const DEMO_PROFILE: Profile = {
-  adminName: "Adrija Chakravorty",
-  legalName: "Fullmetal-Brotherhood",
-  email: "adrija@fullmetal.final",
-  phone: "+91 22 6789 0100",
-  address: "Shahid Bhagat Singh Marg, Fort, Mumbai - 400001",
-  jurisdiction: "Mumbai, India",
-  handle: "fullmetal-brotherhood",
-};
-// Served from frontend/public — see the note at the end of this change.
-const DEMO_LOGO = "/fullmetal-brotherhood-mock-logo.png";
-
 export default function Onboarding() {
   const account = useCurrentAccount();
   const router = useRouter();
@@ -71,12 +57,6 @@ export default function Onboarding() {
 
   const set = (k: keyof Profile) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setP((prev) => ({ ...prev, [k]: e.target.value }));
-
-  // demo convenience: fill every field + the logo with the Fullmetal-Brotherhood profile
-  const autofill = () => {
-    setP(DEMO_PROFILE);
-    setLogo(DEMO_LOGO);
-  };
 
   const profileComplete = Boolean(
     p.adminName.trim() && p.legalName.trim() && p.email.trim() && p.handle.trim(),
@@ -165,19 +145,9 @@ export default function Onboarding() {
         <div className="mx-auto max-w-[560px] py-12 lg:py-16">
           {/* the form card */}
           <section className="rounded-[16px] border-[0.5px] border-line bg-surface p-7 sm:p-9">
-            <div className="flex items-center justify-between">
-              <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">
-                Create new institution profile
-              </p>
-              <button
-                type="button"
-                onClick={autofill}
-                title="Fill the form with the Fullmetal-Brotherhood demo profile"
-                className="rounded-[6px] border-[0.5px] border-line bg-bg px-2.5 py-1 font-mono text-[11px] tracking-[0.12em] text-faint transition-colors hover:border-line-strong hover:text-muted"
-              >
-                Auto-fill
-              </button>
-            </div>
+            <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">
+              Create new institution profile
+            </p>
 
             <div className="mt-7 grid gap-5">
               <div className="grid gap-5 sm:grid-cols-2">
